@@ -158,7 +158,7 @@ function outsetOutline(outline, distance) {
  * passes. Paths are piecewise linear and sample every inset vertex Y as well
  * as uniform stations, so interpolation stays inside each rail band.
  */
-export function generateBoardPaths(vertices, { stepover = 5, safetyMargin = 10, sampleStep = 1, railApex = false, toolRadius = 0, edgeHeight = 0 } = {}) {
+function generateBoardPathsY(vertices, { stepover = 5, safetyMargin = 10, sampleStep = 1, railApex = false, toolRadius = 0, edgeHeight = 0 } = {}) {
     if (!(stepover > 0) || !Number.isFinite(stepover) || !(sampleStep > 0) || !Number.isFinite(sampleStep) ||
         !(safetyMargin >= 0) || !Number.isFinite(safetyMargin)) {
         throw new Error('curved path prototype requires positive stepover/sample spacing and nonnegative safety margin');
@@ -233,7 +233,7 @@ export function generateBoardPaths(vertices, { stepover = 5, safetyMargin = 10, 
 /** Perimeter cut: straight flute begins just below the underside rocker.
  * Uses only the operation mesh. This intentionally does not sample deck Z.
  */
-export function generateBoardOutline(vertices, { outline = projectBoardOutline(vertices), toolRadius,
+function generateBoardOutlineY(vertices, { outline = projectBoardOutline(vertices), toolRadius,
     edgeHeight, through = 0.1, sampleStep = 1, startXY, clockwise = true } = {}) {
     if (![toolRadius, edgeHeight, through, sampleStep].every(Number.isFinite) ||
         toolRadius <= 0 || edgeHeight < 0 || through < 0 || sampleStep <= 0) {
@@ -285,4 +285,48 @@ export function generateBoardOutline(vertices, { outline = projectBoardOutline(v
     }
     points.push({ ...points[0] }); // explicit closure for contouring's open polygons
     return points;
+}
+
+
+// Proper 90-degree rotation preserves winding and milling direction. Only the
+// outline helper uses this frame; raster, tabs and output stay in physical XY.
+function boardFrameVertices(vertices) {
+    const local = new Float32Array(vertices.length);
+    for (let i = 0; i < vertices.length; i += 3) {
+        local[i] = -vertices[i + 1]; local[i + 1] = vertices[i]; local[i + 2] = vertices[i + 2];
+    }
+    return local;
+}
+const toBoardFrame = p => ({ ...p, x: -p.y, y: p.x });
+const fromBoardFrame = p => ({ ...p, x: p.y, y: -p.x });
+
+export function generateBoardPaths(vertices, options = {}) {
+    const axis = options.lengthAxis ?? 'Y';
+    if (axis !== 'X' && axis !== 'Y') throw new Error('prototype length axis must be X or Y');
+    const result = generateBoardPathsY(axis === 'X' ? boardFrameVertices(vertices) : vertices, options);
+    result.lengthAxis = axis;
+    if (axis === 'X') {
+        for (const key of ['outline', 'inset', 'clipOutline']) result[key] = result[key].map(fromBoardFrame);
+        for (const path of result.paths) path.points = path.points.map(fromBoardFrame);
+        if (result.apexSections) result.apexSections = result.apexSections.map(section => ({
+            ...section, x: section.y,
+            left: { ...section.left, x: section.y, y: -section.left.x, normal: fromBoardFrame(section.left.normal) },
+            right: { ...section.right, x: section.y, y: -section.right.x, normal: fromBoardFrame(section.right.normal) }
+        }));
+    }
+    return result;
+}
+
+export function generateBoardOutline(vertices, options = {}) {
+    const axis = options.lengthAxis ?? 'Y';
+    if (axis !== 'X' && axis !== 'Y') throw new Error('prototype length axis must be X or Y');
+    if (axis === 'Y') return generateBoardOutlineY(vertices, options);
+    return generateBoardOutlineY(boardFrameVertices(vertices), {
+        ...options, outline: options.outline?.map(toBoardFrame), startXY: options.startXY && toBoardFrame(options.startXY)
+    }).map(p => {
+        const point = fromBoardFrame(p);
+        point.contactX = p.contactY;
+        delete point.contactY;
+        return point;
+    });
 }

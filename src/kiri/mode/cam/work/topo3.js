@@ -91,9 +91,6 @@ export class Topo {
         if (curvedPathRailApex && !tool.isBullNose()) {
             throw new Error('curved rail-apex prototype currently requires a bull nose cutter');
         }
-        if (curvedPathPrototype && boundsY <= boundsX) {
-            throw new Error('curved path prototype requires board length along Y (blue axis); rotate the board 90 degrees around Z');
-        }
 
         // Prototype operations must neither consume nor replace the cache used
         // by existing Contour X/Y operations.
@@ -431,6 +428,7 @@ export class Topo {
             prototypeStepover: contour.curvedPathStepover ?? 5,
             prototypeSafetyMargin: contour.curvedPathSafetyMargin ?? 10,
             prototypeRailApex: curvedPathRailApex,
+            prototypeLengthAxis: boundsX > boundsY ? "X" : "Y",
             prototypeOutline: curvedPathRailApex && contour.curvedPathOutline !== false,
             prototypeOutlineThrough: contour.curvedPathOutlineThrough ?? 0.1,
             prototypeOutlineClockwise: contour.direction === "climb",
@@ -588,6 +586,7 @@ export class Topo {
         if (params.curvedPathPrototype) {
             onupdate(0, 1, "project board outline");
             const generated = generateBoardPaths(params.prototypeVertices, {
+                lengthAxis: params.prototypeLengthAxis,
                 stepover: params.prototypeStepover,
                 safetyMargin: params.prototypeSafetyMargin,
                 sampleStep: resolution * density,
@@ -621,6 +620,7 @@ export class Topo {
                     onupdate(0, 1, "deck perimeter prototype");
                     const last = generated.paths[generated.paths.length - 1].points;
                     const points = generateBoardOutline(params.prototypeVertices, {
+                        lengthAxis: params.prototypeLengthAxis,
                         outline: generated.outline, toolRadius: params.prototypeToolRadius,
                         edgeHeight: params.prototypeEdgeHeight, through: params.prototypeOutlineThrough,
                         sampleStep: resolution * density, startXY: last[last.length - 1],

@@ -248,3 +248,28 @@ test('deck perimeter rejects invalid depths and starts nearest the preceding pas
     assert.ok(path[0].x > 40);
     assert.ok(Math.abs(path[0].y) < 2);
 });
+
+test('OpenShaper X-long deck and perimeter preserve rotated geometry, Z and pass order', () => {
+    const mesh = roundedRailMesh(), xmesh = [];
+    for (let i=0;i<mesh.length;i+=3) xmesh.push(mesh[i+1],-mesh[i],mesh[i+2]);
+    const opts = {stepover:12, sampleStep:2, safetyMargin:10, railApex:true, toolRadius:8, edgeHeight:3};
+    const y = generateBoardPaths(mesh,opts), x = generateBoardPaths(xmesh,{...opts,lengthAxis:'X'});
+    assert.equal(x.lengthAxis,'X');
+    assert.equal(x.paths.length,y.paths.length);
+    for(let i=0;i<x.paths.length;i++) {
+        assert.equal(x.paths[i].side,y.paths[i].side);
+        assert.equal(x.paths[i].points.length,y.paths[i].points.length);
+        for(let j=0;j<x.paths[i].points.length;j++) {
+            const a=x.paths[i].points[j],b=y.paths[i].points[j];
+            close(a.x,b.y);close(a.y,-b.x);close(a.minZ,b.minZ);
+        }
+    }
+    const outlineOpts={toolRadius:8,edgeHeight:3,sampleStep:2};
+    const yp=generateBoardOutline(mesh,outlineOpts);
+    const xp=generateBoardOutline(xmesh,{...outlineOpts,lengthAxis:'X',outline:x.outline});
+    assert.equal(xp.length,yp.length);
+    for(let i=0;i<xp.length;i++) {
+        close(xp[i].x,yp[i].y);close(xp[i].y,-yp[i].x);close(xp[i].z,yp[i].z);
+        close(xp[i].contactX,yp[i].contactY);
+    }
+});

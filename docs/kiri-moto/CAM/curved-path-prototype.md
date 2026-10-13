@@ -6,7 +6,7 @@ description: Opt-in CPU stringer-to-rail surfboard finishing prototype
 
 This experiment runs only when a Contour operation has `curvedPathPrototype: true`. Normal Contour X/Y, WebGPU, UI controls, and G-code generation retain their existing behavior.
 
-Orient the surfboard length along **Y**, with width along **X**. The earlier `workspace_choco.kmz` has its length along X; rotate the board 90 degrees around Z before testing Stage 2. Use the surfboard widget alone for this test. Red is X and blue is Y. An X-long board is rejected before rasterization. The prototype raster runs locally on the CPU worker, bypassing the minion queue and yielding between batches to deliver progress updates.
+OpenShaper boards can be imported with length along **X** and width along **Y**, without rotation. The prototype uses the longer XY extent as the longitudinal axis, so existing Y-long workspaces also remain supported. Red is X and blue is Y. Use the surfboard widget alone for this test. The prototype raster runs locally on the CPU worker, bypassing the minion queue and yielding between batches to deliver progress updates.
 
 The prototype reads the current operation's widget through `getGeoVertices({ unroll: true, translate: true })`. It unions the XY projections of its triangles, including triangle edges between mesh vertices. It does not read stock geometry, tab meshes, other widgets, or the combined shadow. Disconnected projections, projected holes, and non-Y-monotone inset outlines are rejected rather than bridged. Separate semantic objects joined into one mesh cannot be distinguished automatically; the widget must contain only the board.
 
@@ -24,12 +24,12 @@ kiri_api.conf.save();
 
 The number of widening passes per side is `ceil(maximum projected board half-width / stepover)`. Interpolation toward each inset rail keeps the lateral spacing no greater than this value; spacing decreases near the ends. The full centre-to-rail set is generated, replacing Stage 1's single sine path.
 
-The margin is an XY polygon inset, not a horizontal X subtraction. A 0.01 mm numerical guard is added to the offset. Paths converge at common inset nose/tail endpoints; blunt ends use a short smooth taper to avoid abrupt lateral tip segments. Every inset polygon vertex Y is included along with uniformly sampled Y stations. Each XY polyline then passes through `Trace.followPath_sync()` for arc-length sampling, cutter-compensated Z, leave, tabs, and clipping. Output remains open polygons in `slice.camLines`.
+The margin is an XY polygon inset, not a horizontal X subtraction. A 0.01 mm numerical guard is added to the offset. Paths converge at common inset nose/tail endpoints; blunt ends use a short smooth taper to avoid abrupt lateral tip segments. Every inset polygon vertex along the longitudinal axis is included along with uniformly sampled stations. Each XY polyline then passes through `Trace.followPath_sync()` for arc-length sampling, cutter-compensated Z, leave, tabs, and clipping. Output remains open polygons in `slice.camLines`.
 
 To verify in the browser:
 
 1. Restart `npm run dev`, then hard-refresh the local app.
-2. Import the workspace and rotate its board into the Y orientation.
+2. Import the original OpenShaper workspace with length along X; no rotation is needed. Existing Y-long workspaces also work.
 3. Apply the console settings above, then Slice and Preview.
 4. Check that the centre pass comes first, successive left/right passes widen, and their directions alternate. Inspect both ends for continuity and convergence.
 5. Replay stock animation, including the gated Stage 1 alignment correction.

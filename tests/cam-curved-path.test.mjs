@@ -447,12 +447,13 @@ test('stage 2 extracts only the current widget mesh, excluding stock/tabs/unrela
     assert.equal(meshCalls,1);
 });
 
-test('prototype rejects X-long boards before raster work; normal contour stays unchanged', async () => {
+test('prototype accepts OpenShaper X-long boards without rotating mesh; Y-long remains supported', async () => {
     const state=cacheState();state.widget.bounds.max.y=3.4;
-    const topo=new CacheDiagnosticTopo();
-    await assert.rejects(topo.generate({state,contour:{axis:'X',tool:1,tolerance:1,step:.2,
-        inside:true,curvedPathPrototype:true},onupdate(){},ondone(){}}),/length along Y \(blue axis\)/);
-    assert.equal(topo.builds.length,0);
+    const xlong=await generateCached(state,{tolerance:1});
+    assert.equal(xlong.contourParams.prototypeLengthAxis,'X');
+    assert.equal(xlong.builds.length,1);
+    const ylong=await generateCached(cacheState(),{tolerance:1});
+    assert.equal(ylong.contourParams.prototypeLengthAxis,'Y');
     const normal=await generateCached(state,{curvedPathPrototype:false,tolerance:1});
     assert.equal(normal.builds.length,1);
 });
@@ -578,4 +579,22 @@ test('rail-apex physical footprint uses true XY offsets and leaves rounded sampl
     const physical=trace.followPath_sync([{x,y},{x:x+.01,y}])[0].points[0].z;
     assert.ok(Math.abs(physical-expected)<1e-7);
     assert.ok(physical>normal);
+});
+
+test('X-long centre pass samples Z, clipping and tabs in original raster coordinates', async () => {
+    const {trace}=setup({}, {resolution:1,density:1});
+    const topo=new Topo();topo.trace=trace;const newslices=[];
+    await topo.contour({minX:10,maxX:17,minY:-4,maxY:0,boundsX:7,boundsY:4,
+        box:box(10,-4,17,0),partOff:0,resolution:1,density:1,
+        curvedPathPrototype:true,prototypeLengthAxis:'X',newslices,leave:.5,
+        clipTo:[box(10,-4,12.5,0),box(14.5,-4,17,0)],
+        clipTab:[Object.assign(box(15,-3,17,-1),{z:12})],clipTabZ:[12],tabHeight:12,
+        prototypeVertices:[10,-4,0,17,-4,0,17,0,0,10,-4,0,17,0,0,10,0,0],
+        prototypeStepover:1,prototypeSafetyMargin:.2},()=>{});
+    const centre=newslices[0].camLines;
+    assert.equal(centre.length,2);
+    assert.ok(centre.every(p=>p.points.every(q=>Math.abs(q.y+2)<1e-6)));
+    assert.ok(centre[0].points.every(q=>q.x<=12.5));
+    assert.ok(centre[1].points.every(q=>q.x>=14.5));
+    assert.ok(centre[1].points.some(q=>q.z===12.5));
 });
