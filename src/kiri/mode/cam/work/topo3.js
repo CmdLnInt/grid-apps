@@ -7,7 +7,7 @@ import { newSlice } from '../../../core/slice.js';
 import { Slicer as topo_slicer } from './slicer-topo.js';
 import { polygons as POLY } from '../../../../geo/polygons.js';
 import { Tool } from '../core/tool.js';
-import { generateBoardPaths } from '../core/curved-path.js';
+import { generateBoardPaths, generateBoardOutline } from '../core/curved-path.js';
 
 const RAD2DEG = 180 / Math.PI;
 const DEG2RAD = Math.PI / 180;
@@ -431,6 +431,9 @@ export class Topo {
             prototypeStepover: contour.curvedPathStepover ?? 5,
             prototypeSafetyMargin: contour.curvedPathSafetyMargin ?? 10,
             prototypeRailApex: curvedPathRailApex,
+            prototypeOutline: curvedPathRailApex && contour.curvedPathOutline !== false,
+            prototypeOutlineThrough: contour.curvedPathOutlineThrough ?? 0.1,
+            prototypeOutlineClockwise: contour.direction === "climb",
             prototypeToolRadius: tool.fluteDiameter() / 2,
             prototypeEdgeHeight: curvedPathRailApex ? tool.getBullNoseParams().rise : undefined,
             rasterPadding,
@@ -613,6 +616,29 @@ export class Topo {
                         newslices.push(slice);
                     }
                     onupdate(i + 1, generated.paths.length, "stringer-to-rail prototype");
+                }
+                if (params.prototypeOutline) {
+                    onupdate(0, 1, "deck perimeter prototype");
+                    const last = generated.paths[generated.paths.length - 1].points;
+                    const points = generateBoardOutline(params.prototypeVertices, {
+                        outline: generated.outline, toolRadius: params.prototypeToolRadius,
+                        edgeHeight: params.prototypeEdgeHeight, through: params.prototypeOutlineThrough,
+                        sampleStep: resolution * density, startXY: last[last.length - 1],
+                        clockwise: params.prototypeOutlineClockwise
+                    });
+                    const polygon = newPolygon().setOpen();
+                    for (const p of points) {
+                        const point = newPoint(p.x, p.y, p.z);
+                        for (const tab of clipTab || []) {
+                            if (trace.inClip([tab], point.z, point)) point.z = Math.max(point.z, trace.tabZ);
+                        }
+                        polygon.push(point);
+                    }
+                    const slice = newSlice(generated.paths.length);
+                    slice.camLines = [polygon];
+                    slice.prototypeOutline = true;
+                    newslices.push(slice);
+                    onupdate(1, 1, "deck perimeter prototype");
                 }
             } finally {
                 trace.cleanup();

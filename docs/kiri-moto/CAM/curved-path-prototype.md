@@ -64,3 +64,21 @@ kiri_api.conf.save();
 ```
 
 Re-slice and inspect the stock animation from the side: the final pass on each side should extend down to the widest rail point. This is a geometry/sampling prototype, not a validated machining strategy.
+
+
+## Appended deck perimeter prototype
+
+Rail-apex mode now appends a single perimeter loop after all deck passes, within the same contour operation. The loop offsets the projected apex outline outward by the flute radius (plus the existing 0.01 mm offset guard). Its Z follows the lowest triangle intersection across each transverse board section. The cutter tip is below this underside curve by the bull nose's rounded-end rise plus `curvedPathOutlineThrough` (default 0.1 mm). For the Choco cutter this totals about 6.004 mm. This deliberately bypasses deck clearance sampling and the deck Z minimum; matching tabs raise the tip to their existing tab height.
+
+```js
+var op = kiri_api.conf.get().process.ops.find(op => op.type === "contour");
+op.curvedPathPrototype = true;
+op.curvedPathRailApex = true;
+op.curvedPathOutline = true; // enabled by default in rail-apex mode
+op.curvedPathOutlineThrough = 0.1; // millimetres
+kiri_api.conf.save();
+```
+
+Reload the updated application, apply these settings, and re-slice. Preview should show all deck passes followed by one closed perimeter loop. Inspect side views and stock animation to check underside following and straight-flute engagement. Set `curvedPathOutline = false` to compare against the committed deck-only behavior. Normal contours and inset-only prototypes do not append this loop.
+
+The section minimum is a conservative underside rocker definition, not an exact local bottom contact surface at the rail. Validate cutter swept volume, stock/support clearance (the tip extends about 6 mm below the underside), tabs, entry/exit and the transition from the last deck pass before machining. No additional safe transition strategy is introduced here.

@@ -95,7 +95,7 @@ function railAt(outline, y) {
 // Assign triangles only to stations within their Y range to avoid an O(mesh *
 // stations) scan of the entire board for every rail sample.
 function railApexSections(vertices, stations) {
-    const sections = stations.map(s => ({ y: s.y, left: { x: Infinity, z: -Infinity }, right: { x: -Infinity, z: -Infinity } }));
+    const sections = stations.map(s => ({ y: s.y, bottomZ: Infinity, left: { x: Infinity, z: -Infinity }, right: { x: -Infinity, z: -Infinity } }));
     const lowerBound = y => {
         let low = 0, high = stations.length;
         while (low < high) {
@@ -106,6 +106,7 @@ function railApexSections(vertices, stations) {
         return low;
     };
     const add = (section, x, z) => {
+        section.bottomZ = Math.min(section.bottomZ, z);
         if (x < section.left.x || (x === section.left.x && z > section.left.z)) section.left = { x, z };
         if (x > section.right.x || (x === section.right.x && z > section.right.z)) section.right = { x, z };
     };
@@ -134,7 +135,7 @@ function railApexSections(vertices, stations) {
         }
         const before = sections[Math.max(0, i - 1)], after = sections[Math.min(sections.length - 1, i + 1)];
         for (const side of ['left', 'right']) {
-            const slope = (after[side].x - before[side].x) / (after.y - before.y);
+            const slope = after.y === before.y ? 0 : (after[side].x - before[side].x) / (after.y - before.y);
             const sign = side === 'left' ? -1 : 1;
             const length = Math.hypot(1, slope);
             section[side].normal = { x: sign / length, y: -sign * slope / length };
@@ -227,4 +228,61 @@ export function generateBoardPaths(vertices, { stepover = 5, safetyMargin = 10, 
     }
     return { outline, inset, clipOutline: railApex ? outsetOutline(outline, toolRadius) : inset,
         paths, maxHalfWidth, maxBoardHalfWidth, sidePasses, stepover, safetyMargin, railApex, apexSections };
+}
+
+/** Perimeter cut: straight flute begins just below the underside rocker.
+ * Uses only the operation mesh. This intentionally does not sample deck Z.
+ */
+export function generateBoardOutline(vertices, { outline = projectBoardOutline(vertices), toolRadius,
+    edgeHeight, through = 0.1, sampleStep = 1, startXY, clockwise = true } = {}) {
+    if (![toolRadius, edgeHeight, through, sampleStep].every(Number.isFinite) ||
+        toolRadius <= 0 || edgeHeight < 0 || through < 0 || sampleStep <= 0) {
+        throw new Error('invalid prototype outline cutter or sampling parameters');
+    }
+    const ring = outsetOutline(outline, toolRadius);
+    const area = ring.reduce((sum, a, i) => {
+        const b = ring[(i + 1) % ring.length];
+        return sum + a.x * b.y - b.x * a.y;
+    }, 0);
+    if ((area < 0) !== clockwise) ring.reverse();
+    if (startXY) {
+        let nearest = 0, distance = Infinity;
+        ring.forEach((p, i) => {
+            const d = Math.hypot(p.x - startXY.x, p.y - startXY.y);
+            if (d < distance) { nearest = i; distance = d; }
+        });
+        ring.push(...ring.splice(0, nearest));
+    }
+    let minY = Infinity, maxY = -Infinity;
+    for (let i = 1; i < vertices.length; i += 3) {
+        minY = Math.min(minY, vertices[i]); maxY = Math.max(maxY, vertices[i]);
+    }
+    const points = [];
+    for (let i = 0; i < ring.length; i++) {
+        const a = ring[i], b = ring[(i + 1) % ring.length];
+        const count = Math.ceil(Math.hypot(b.x - a.x, b.y - a.y) / sampleStep);
+        if (points.length + count > 2000000) throw new Error('prototype outline exceeds sample limit');
+        for (let j = 0; j < count; j++) {
+            const t = j / count, x = a.x + (b.x - a.x) * t, y = a.y + (b.y - a.y) * t;
+            let distance = Infinity, contactY;
+            for (let k = 0; k < outline.length; k++) {
+                const c = outline[k], d = outline[(k + 1) % outline.length];
+                const dx = d.x - c.x, dy = d.y - c.y;
+                const u = Math.max(0, Math.min(1, ((x - c.x) * dx + (y - c.y) * dy) / (dx * dx + dy * dy)));
+                const dist = Math.hypot(x - c.x - u * dx, y - c.y - u * dy);
+                if (dist < distance) { distance = dist; contactY = c.y + u * dy; }
+            }
+            points.push({ x, y, contactY: Math.max(minY, Math.min(maxY, contactY)) });
+        }
+    }
+    if (points.length > 2000000) throw new Error('prototype outline exceeds sample limit');
+    const ys = [...new Set(points.map(p => p.contactY))].sort((a, b) => a - b);
+    const sections = railApexSections(vertices, ys.map(y => ({ y })));
+    const bottoms = new Map(sections.map(s => [s.y, s.bottomZ]));
+    for (const p of points) {
+        p.bottomZ = bottoms.get(p.contactY);
+        p.z = p.bottomZ - edgeHeight - through;
+    }
+    points.push({ ...points[0] }); // explicit closure for contouring's open polygons
+    return points;
 }

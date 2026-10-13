@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 
 globalThis.self ??= globalThis;
-const { generateBoardPaths } = await import('../src/kiri/mode/cam/core/curved-path.js');
+const { generateBoardPaths, generateBoardOutline } = await import('../src/kiri/mode/cam/core/curved-path.js');
 
 // Execute the actual Topo/Probe/Trace code without loading the browser-only
 // geometry dependency graph. These doubles only supply polygon storage,
@@ -16,7 +16,7 @@ const box = (minX, minY, maxX, maxY) => ({
     expandByVector(v) { this.min.x -= v.x; this.min.y -= v.y; this.max.x += v.x; this.max.y += v.y; return this; }
 });
 const context = vm.createContext({
-    generateBoardPaths,
+    generateBoardPaths, generateBoardOutline,
     setTimeout,
     THREE: { Vector3: class { constructor(x, y, z) { Object.assign(this, { x, y, z }); } } },
     self: { kiri_worker: { minions: { running: true, broadcast() { throw Error('prototype must not dispatch minions'); } } } },
@@ -520,6 +520,31 @@ test('rail-apex contour permits exterior cutter centres in the padded raster whi
     const pts=newslices.flatMap(s=>s.camLines.flatMap(p=>p.points));
     assert.ok(pts.some(p=>p.x>40));assert.ok(pts.some(p=>p.x<-40));
     assert.ok(pts.every(p=>p.z>=18)); // widest-point tie chooses deck-side apex
+});
+
+test('deck perimeter is appended after finishing and raises over matching tabs',async()=>{
+    const {trace}=setup({minX:-45,minY:-125,stepsX:91,stepsY:251,resolution:1,
+        data:new Float32Array(91*251).fill(0)},
+        {box:box(-45,-125,45,125),resolution:1,density:1});
+    const vertices=[];
+    // A rectangular projection with side apex height Z=10 and upper deck Z=20.
+    for(const z of [10,20])vertices.push(-40,-120,z,40,-120,z,40,120,z,-40,-120,z,40,120,z,-40,120,z);
+    const topo=new Topo();topo.trace=trace;const newslices=[];
+    await topo.contour({minX:-45,maxX:45,minY:-125,maxY:125,boundsX:90,boundsY:250,
+        box:box(-40,-120,40,120),partOff:0,resolution:1,density:1,leave:0,
+        clipTo:[box(-40,-120,40,120)],curvedPathPrototype:true,
+        prototypeVertices:vertices,prototypeStepover:10,prototypeSafetyMargin:10,
+        prototypeOutline:true,prototypeOutlineThrough:0.1,prototypeOutlineClockwise:true,
+        clipTab:[Object.assign(box(43,-20,45,20),{z:12})],clipTabZ:[12],tabHeight:12,
+        prototypeRailApex:true,prototypeToolRadius:4,prototypeEdgeHeight:2,rasterPadding:5,newslices},()=>{});
+    const final = newslices.at(-1);
+    assert.equal(final.prototypeOutline,true);
+    assert.equal(final.z,topo.prototypePaths.paths.length);
+    const pts = final.camLines[0].points;
+    assert.deepEqual([pts[0].x,pts[0].y,pts[0].z],[pts.at(-1).x,pts.at(-1).y,pts.at(-1).z]);
+    assert.ok(pts.some(p=>p.x>43 && Math.abs(p.y)<20 && p.z===12));
+    assert.ok(pts.some(p=>p.z===7.9));
+    assert.ok(newslices.slice(0,-1).every(s=>!s.prototypeOutline));
 });
 
 test('rail-apex raster planes use padded origin rather than the mesh origin',async()=>{

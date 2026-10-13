@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 
 globalThis.self ??= globalThis;
-const { projectBoardOutline, generateBoardPaths } = await import('../src/kiri/mode/cam/core/curved-path.js');
+const { projectBoardOutline, generateBoardPaths, generateBoardOutline } = await import('../src/kiri/mode/cam/core/curved-path.js');
 
 function triangles(outline, z = 1) {
     const vertices = [];
@@ -214,4 +214,37 @@ test('rail-apex mode preserves alternating order and a finite Z lower bound',()=
         assert.ok(path.every(p=>Number.isFinite(p.minZ)));
     }
     assert.throws(()=>generateBoardPaths(roundedRailMesh(),{railApex:true}),/cutter radius/);
+});
+
+
+test('deck perimeter follows underside, offsets apex, closes explicitly and obeys direction', () => {
+    const mesh = roundedRailMesh();
+    for (const clockwise of [true, false]) {
+        const path = generateBoardOutline(mesh, { toolRadius: 8, edgeHeight: 3, through: 0.1, sampleStep: 1, clockwise });
+        assert.deepEqual(path[0], path.at(-1));
+        const outline = projectBoardOutline(mesh);
+        let area = 0;
+        for (let i = 0; i < path.length - 1; i++) {
+            const a = path[i], b = path[i + 1];
+            assert.ok(Math.hypot(b.x-a.x,b.y-a.y) <= 1.00001);
+            assert.ok(distanceToOutline(a, outline) >= 7.999);
+            close(a.z, a.bottomZ - 3.1);
+            // Bottom between mesh rings is linear, not the top or rail apex.
+            const y = Math.abs(a.contactY), low = Math.floor(y / 60) * 60;
+            const high = Math.min(120, low + 60);
+            const expected = 10 + low * low / 10000 + (high === low ? 0 :
+                (high * high - low * low) / 10000 * (y - low) / (high - low));
+            close(a.bottomZ, expected);
+            area += a.x*b.y-b.x*a.y;
+        }
+        assert.equal(area < 0, clockwise);
+    }
+});
+
+test('deck perimeter rejects invalid depths and starts nearest the preceding pass', () => {
+    const mesh = roundedRailMesh();
+    assert.throws(() => generateBoardOutline(mesh, { toolRadius: 8, edgeHeight: 3, through: -1 }));
+    const path = generateBoardOutline(mesh, { toolRadius: 8, edgeHeight: 3, startXY: {x:100,y:0} });
+    assert.ok(path[0].x > 40);
+    assert.ok(Math.abs(path[0].y) < 2);
 });
