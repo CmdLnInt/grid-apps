@@ -598,3 +598,36 @@ test('X-long centre pass samples Z, clipping and tabs in original raster coordin
     assert.ok(centre[1].points.every(q=>q.x>=14.5));
     assert.ok(centre[1].points.some(q=>q.z===12.5));
 });
+
+
+test('bottom side defaults to no perimeter while deck and explicit settings retain behavior', async () => {
+    const bottom=await generateCached(cacheState(),{curvedPathSide:'bottom'});
+    assert.equal(bottom.contourParams.prototypeOutline,false);
+    // Exercise the enabled rail-apex branch with the bullnose fixture.
+    const state=cacheState();
+    state.widget.bounds.clone = function() {
+        const copy=box(this.min.x,this.min.y,this.max.x,this.max.y);
+        copy.min.z=this.min.z;copy.max.z=this.max.z;return copy;
+    };
+    state.settings.tools[0].type='bullnose';
+    state.settings.tools[0].corner_radius=.5;state.settings.tools[0].bottom_radius=20;
+    const b=await generateCached(state,{curvedPathRailApex:true,curvedPathSide:'bottom'});
+    assert.equal(b.contourParams.prototypeOutline,false);
+    const a=await generateCached(state,{curvedPathRailApex:true});
+    assert.equal(a.contourParams.prototypeOutline,true);
+});
+
+test('flipped asymmetric underside compensation uses bottom rocker rather than deck', () => {
+    const data=new Float32Array(40);
+    // After X flip, Z = boardTop - original underside Z. The nose and
+    // tail have different curvature; Y indices reverse while X stays fixed.
+    for(let x=0;x<8;x++)for(let y=0;y<5;y++) data[x*5+y]=30-(2+.05*x*x+(4-y)*.2);
+    const {trace,probe}=setup({data});
+    const path=[{x:10,y:-2},{x:17,y:-2}];
+    const points=trace.followPath_sync(path)[0].points;
+    for(const p of points) {
+        const x=Math.round(p.x-10),y=Math.round(p.y+4);
+        assert.equal(p.z,probe.toolAtZ(x,y));
+    }
+    assert.ok(points[0].z>points.at(-1).z);
+});

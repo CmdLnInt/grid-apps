@@ -429,7 +429,7 @@ export class Topo {
             prototypeSafetyMargin: contour.curvedPathSafetyMargin ?? 10,
             prototypeRailApex: curvedPathRailApex,
             prototypeLengthAxis: boundsX > boundsY ? "X" : "Y",
-            prototypeOutline: curvedPathRailApex && contour.curvedPathOutline !== false,
+            prototypeOutline: curvedPathRailApex && (contour.curvedPathOutline ?? (contour.curvedPathSide !== "bottom")),
             prototypeOutlineThrough: contour.curvedPathOutlineThrough ?? 0.1,
             prototypeOutlineClockwise: contour.direction === "climb",
             prototypeToolRadius: tool.fluteDiameter() / 2,

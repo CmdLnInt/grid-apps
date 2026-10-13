@@ -82,3 +82,20 @@ kiri_api.conf.save();
 Reload the updated application, apply these settings, and re-slice. Preview should show all deck passes followed by one closed perimeter loop. Inspect side views and stock animation to check underside following and straight-flute engagement. Set `curvedPathOutline = false` to compare against the committed deck-only behavior. Normal contours and inset-only prototypes do not append this loop.
 
 The section minimum is a conservative underside rocker definition, not an exact local bottom contact surface at the rail. Validate cutter swept volume, stock/support clearance (the tip extends about 6 mm below the underside), tabs, entry/exit and the transition from the last deck pass before machining. No additional safe transition strategy is introduced here.
+
+
+## Bottom cut on side B
+
+Use the existing CAM **Flip** operation, choose axis **X**, and use its Flip action. This rotates the board 180° around its length (nose and tail retain X), transforms tabs, switches the stock Z anchor, clears geometry caches and exchanges the two operation lists. Simply adding a Flip operation does not execute the flip.
+
+When side B is empty (or contains only its return Flip), flipping an active prototype deck setup around X now seeds side B with copies of its active curved contours. Each is marked `curvedPathSide: "bottom"`, labelled `Curved bottom`, and has `curvedPathOutline: false`. Tool, stepover, leave, tolerance and rail-apex settings are copied. Existing side-B operations are never replaced; normal contours and Y flips retain their existing behavior. Flipping back restores the original deck list without creating duplicates.
+
+Reload the updated app, open the deck workspace and save it before flipping. Add a Flip operation if needed, select **X**, and click its Flip action. Confirm the underside faces upward and the operation list shows the bottom contour followed by the return Flip. Slice and preview side B. Confirm stringer-to-rail passes follow the underside rocker and no perimeter loop is emitted. Use Flip around X again to return to the deck setup. Export each setup separately only after validating its coordinates, support and cutter clearance.
+
+Bottom finishing uses the transformed mesh with the same compensated physical XY sampler; it does not invert an already-generated deck toolpath. Side B's stock animation starts with fresh stock and does not preserve the deck cut. The stock fixture/support and actual remaining material are not validated by this animation.
+
+Run bottom-specific tests alongside the existing suite:
+
+```bash
+node --test tests/cam-curved-bottom.test.mjs tests/cam-stringer-paths.test.mjs tests/cam-curved-path.test.mjs tests/cam-prototype-animation.test.mjs tests/cam-bullnose.test.mjs
+```

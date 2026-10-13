@@ -5,6 +5,7 @@ import { env, opAdd, opRender } from './init-ui.js';
 import { CAM } from './dispatch.js';
 import { clearTabs, restoreTabs } from './cl-tab.js';
 import { updateStock } from './cl-stock.js';
+import { createBottomContours } from '../core/curved-bottom.js';
 
 export function opFlip() {
     api.view.set_arrange();
@@ -14,6 +15,12 @@ export function opFlip() {
     // add flip singleton to b-side
     let add2 = op2.length === 0;
     let axis = env.poppedRec.axis;
+    const bottomContours = createBottomContours(ops, op2, axis);
+    // A-side geometry is rotated by the existing workflow, never by the sampler.
+    if (bottomContours.length) {
+        const flipIndex = op2.findIndex(op => op.type === 'flip');
+        op2.splice(flipIndex < 0 ? op2.length : flipIndex, 0, ...bottomContours);
+    }
     env.flipping = true;
     process.camZAnchor = {
         top: "bottom",
@@ -79,6 +86,7 @@ export function opFlip() {
     if (add2) {
         opAdd(env.poppedRec);
     } else {
+        if (bottomContours.length) api.conf.save();
         opRender();
     }
 }
