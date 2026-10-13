@@ -10,6 +10,7 @@ const asLines = false;
 let stock, center, grid, gridX, gridY, rez;
 let path, pathIndex, tool, tools, last, toolID = 1;
 let settings;
+let curvedPathPrototype = false;
 
 export function init(worker) {
     const { dispatch } = worker;
@@ -22,7 +23,12 @@ export function init(worker) {
         const density = parseInt(settings.controller.animesh) * 1000;
 
         pathIndex = 0;
-        path = print.output.flat();
+        // Carry the opt-in flag per operation; do not change the print output.
+        path = print.output.flatMap(layer =>
+            layer.mode?.type === 'contour' && layer.mode.curvedPathPrototype === true
+                ? layer.map(output => ({ ...output, curvedPathPrototype: true }))
+                : layer
+        );
         tools = settings.tools;
         stock = settings.stock;
         rez = 1/Math.sqrt(density/(stock.x * stock.y));
@@ -47,6 +53,7 @@ export function init(worker) {
         gridY = stepsY;
 
         tool = null;
+        curvedPathPrototype = false;
         last = null;
         animating = false;
         animateClear = false;
@@ -177,9 +184,11 @@ function renderPath(send) {
 
     const firstTool = !tool && next.tool;
     const toolChange = !firstTool && (tool.getID() !== next.tool.getID());
-    if (firstTool || toolChange) {
+    const prototypeChange = curvedPathPrototype !== (next.curvedPathPrototype === true);
+    curvedPathPrototype = next.curvedPathPrototype === true;
+    if (firstTool || toolChange || prototypeChange) {
         // on real tool change, go to safe Z first
-        if (tool && last.point) {
+        if (tool && toolChange && last.point) {
             let pos = last.point = {
                 x: last.point.x,
                 y: last.point.y,
@@ -256,6 +265,10 @@ function renderMoves(id, moves, send, seed = 0) {
 
 // update stock mesh to reflect tool tip geometry at given XYZ position
 function deformMesh(pos, send) {
+    if (curvedPathPrototype && tool.isBullNose()) {
+        deformBullNosePrototype(pos);
+        return;
+    }
     const prof = tool.profile;
     const { size, pix } = tool.profileDim;
     const mid = Math.floor(pix / 2);
@@ -285,6 +298,27 @@ function deformMesh(pos, send) {
     }
 }
 
+// Evaluate the experimental cutter at the physical XY of each stock vertex.
+// This avoids assigning a profile height to a displaced, rounded grid position.
+function deformBullNosePrototype(pos) {
+    const fluteRadius = tool.fluteDiameter() / 2;
+    const shaftRadius = tool.shaftDiameter() / 2;
+    const radius = Math.max(fluteRadius, shaftRadius);
+    const x0 = Math.max(0, Math.ceil((pos.x - radius - center.x + stock.x / 2 - rez / 2) / rez));
+    const x1 = Math.min(gridX - 1, Math.floor((pos.x + radius - center.x + stock.x / 2 - rez / 2) / rez));
+    const y0 = Math.max(0, Math.ceil((pos.y - radius - center.y + stock.y / 2 - rez / 2) / rez));
+    const y1 = Math.min(gridY - 1, Math.floor((pos.y + radius - center.y + stock.y / 2 - rez / 2) / rez));
+    for (let x = x0; x <= x1; x++) {
+        for (let y = y0; y <= y1; y++) {
+            const index = (x * gridY + y) * 3;
+            const distance = Math.hypot(grid[index] + center.x - pos.x, grid[index + 1] + center.y - pos.y);
+            if (distance > radius) continue;
+            const height = distance <= fluteRadius ? tool.bullNoseHeight(distance) : tool.fluteLength();
+            grid[index + 2] = Math.min(grid[index + 2], pos.z + height);
+        }
+    }
+}
+
 function updateTool(toolobj, send) {
     if (tool) {
         send.data({ mesh_del: toolID });
@@ -298,6 +332,15 @@ function updateTool(toolobj, send) {
     const { size, pix } = tool.profileDim;
     const { pos, ind, sab } = createGrid(pix, pix, {x:size, y:size, z:flen+slen}, rez);
     const mid = Math.floor(pix/2);
+    if (curvedPathPrototype && tool.isBullNose()) {
+        // createGrid includes padding and a half-cell offset. Put the sampled
+        // profile center at local XY=0 so mesh_move uses the commanded tip.
+        const shift = mid * rez - size / 2 + rez / 2;
+        for (let i = 0; i < pos.length; i += 3) {
+            pos[i] -= shift;
+            pos[i + 1] -= shift;
+        }
+    }
     // deform mesh to fit tool profile
     for (let i=0, il=prof.length; i < il; ) {
         const dx = mid + prof[i++];

@@ -25,6 +25,7 @@ export class Topo {
             axis = contour.axis.toLowerCase(),
             contourX = axis === "x",
             contourY = axis === "y",
+            curvedPathPrototype = contour.curvedPathPrototype === true,
             bounds = widget.getBoundingBox().clone(),
             tolerance = contour.tolerance,
             flatness = contour.flatness || (tolerance / 100),
@@ -49,12 +50,15 @@ export class Topo {
             bridge = contour.bridging || 0,
             stepsX = Math.ceil(boundsX / resolution),
             stepsY = Math.ceil(boundsY / resolution),
-            widtopo = widget.topo,
+            // Isolate the experiment from the legacy cache. Rebuilding ensures
+            // raster spacing, grid dimensions, and the current tool profile all
+            // use the same resolution, including automatic tolerance changes.
+            widtopo = curvedPathPrototype ? undefined : widget.topo,
             topoCache = widtopo
                 && widtopo.tolerance === tolerance
                 && widtopo.diameter === toolDiameter
                 ? widtopo : undefined,
-            topo = widget.topo = topoCache || {
+            topo = topoCache || {
                 axis,
                 data: new Float32Array(new SharedArrayBuffer(stepsX * stepsY * 4)),
                 stepsX,
@@ -78,6 +82,10 @@ export class Topo {
             partOff = inside ? 0 : toolDiameter / 2 + resolution,
             gridDelta = Math.floor(partOff / resolution),
             debug_clips = true;
+
+        // Prototype operations must neither consume nor replace the cache used
+        // by existing Contour X/Y operations.
+        if (!curvedPathPrototype) widget.topo = topo;
 
         if (contour.clipto) {
             let { stock } = settings;
@@ -110,7 +118,7 @@ export class Topo {
             newslices.push(debug);
         }
 
-        if (webGPU && !contour.nogpu) {
+        if (webGPU && !contour.nogpu && !curvedPathPrototype) {
             // invert tool Z offset for gpu code
             let toolBounds = new THREE.Box3()
                 .expandByPoint({ x: -toolDiameter/2, y: -toolDiameter/2, z: 0 })
@@ -335,13 +343,16 @@ export class Topo {
 
         const probe = this.probe = new Probe({
             profile: toolOffset,
+            // A cached raster may have been built with a different auto resolution.
+            // The prototype must use that raster's actual spacing and dimensions.
+            resolution: curvedPathPrototype ? topo.resolution : resolution,
             data,
-            stepsX,
-            stepsY,
+            stepsX: curvedPathPrototype ? topo.stepsX : stepsX,
+            stepsY: curvedPathPrototype ? topo.stepsY : stepsY,
             boundsX,
             boundsY,
-            minX,
-            minY,
+            minX: curvedPathPrototype ? topo.bounds.min.x : minX,
+            minY: curvedPathPrototype ? topo.bounds.min.y : minY,
             zMin
         });
 
@@ -397,6 +408,7 @@ export class Topo {
             toolStep,
             contourX,
             contourY,
+            curvedPathPrototype,
             density,
             clipTo,
             clipTab,
@@ -526,11 +538,41 @@ export class Topo {
 
     async contour(params, onupdate) {
         const trace = this.trace;
-        const concurrent = self.kiri_worker.minions.running;
+        const concurrent = !params.curvedPathPrototype && self.kiri_worker.minions.running;
 
         const { minX, maxX, minY, maxY, boundsX, boundsY, stepsX, stepsY } = params;
         const { gridDelta, resolution, density, partOff, toolStep, contourX, contourY } = params;
         const { clipTo, clipTab, clipTabZ, tabHeight, newslices, leave } = params;
+
+        // Opt-in CPU experiment: one longitudinal sine path in model XY space.
+        // Keep this before the scanline-count guard so neither axis is required.
+        if (params.curvedPathPrototype) {
+            trace.init({
+                box: params.box.clone().expandByVector(new THREE.Vector3(partOff, partOff, 0)),
+                leave, clipTo, clipTab, clipTabZ, tabHeight,
+                resolution, density, concurrent: false
+            });
+            try {
+                const path = Array.from({ length: 65 }, (_, i) => {
+                    const t = i / 64;
+                    return {
+                        x: minX + boundsX * (0.1 + 0.8 * t),
+                        y: minY + boundsY * (0.5 + 0.25 * Math.sin(2 * Math.PI * t))
+                    };
+                });
+                onupdate(0, 1, "curved path prototype");
+                const segments = trace.followPath_sync(path);
+                if (segments.length) {
+                    const slice = newSlice(0);
+                    slice.camLines = segments;
+                    newslices.push(slice);
+                }
+                onupdate(1, 1, "curved path prototype");
+            } finally {
+                trace.cleanup();
+            }
+            return;
+        }
 
         let stepsTaken = 0,
             stepsTotal = 0;
@@ -862,6 +904,80 @@ export class Trace {
         } else {
             this.crossX_sync(params, then);
         }
+    }
+
+    /**
+     * Project an ordered physical XY polyline onto the compensated CPU raster.
+     * Returns open Polygon segments; clipping is evaluated at each sample.
+     * Keep vertices as well as arc-length samples to preserve XY corners.
+     */
+    followPath_sync(path) {
+        const { box, resolution, density, leave = 0, clipTo, clipTab, tabHeight } = this.cross;
+        const { minX, minY, stepsX, stepsY, resolution: rasterResolution } = this.probe.params;
+        const pixelSize = rasterResolution ?? resolution;
+        const step = resolution * density;
+        if (!(step > 0) || !Number.isFinite(step) || !(pixelSize > 0) || !Number.isFinite(pixelSize)) {
+            throw new Error("followPath_sync requires positive finite raster and sample resolution");
+        }
+        const segments = this.slice = [];
+        let polygon = newPolygon().setOpen();
+        const end = () => {
+            if (polygon.length > 1) segments.push(polygon);
+            polygon = newPolygon().setOpen();
+        };
+        const emit = (x, y) => {
+            // Raster cells are written at min + index * resolution, not at
+            // index * bounds/steps (which differs when bounds are rounded up).
+            const gridx = Math.round((x - minX) / pixelSize);
+            const gridy = Math.round((y - minY) / pixelSize);
+            if (x < box.min.x || x > box.max.x || y < box.min.y || y > box.max.y ||
+                x < minX || y < minY ||
+                x > minX + (stepsX - 1) * pixelSize || y > minY + (stepsY - 1) * pixelSize ||
+                gridx < 0 || gridx >= stepsX || gridy < 0 || gridy >= stepsY) {
+                end();
+                return;
+            }
+            const point = newPoint(x, y);
+            if (clipTo && !this.inClip(clipTo, undefined, point)) {
+                end();
+                return;
+            }
+            let z = this.probe.toolAtZ(gridx, gridy);
+            if (clipTab && clipTab.length && z < tabHeight) {
+                // Reuse the same Z-aware polygon predicate. Evaluate tabs one
+                // at a time so tabZ belongs to a matching tab, including overlaps.
+                for (const tab of clipTab) {
+                    if (this.inClip([tab], z, point)) z = Math.max(z, this.tabZ);
+                }
+            }
+            point.z = z + leave;
+            polygon.push(point);
+        };
+        if (!path.length) return segments;
+        for (const point of path) {
+            if (!Number.isFinite(point.x) || !Number.isFinite(point.y)) {
+                throw new Error("followPath_sync requires finite physical XY coordinates");
+            }
+        }
+        emit(path[0].x, path[0].y);
+        let untilSample = step;
+        for (let i = 1; i < path.length; i++) {
+            const from = path[i - 1], to = path[i];
+            const dx = to.x - from.x, dy = to.y - from.y;
+            const length = Math.hypot(dx, dy);
+            if (!length) continue;
+            let distance = untilSample;
+            while (distance < length) {
+                const t = distance / length;
+                emit(from.x + dx * t, from.y + dy * t);
+                distance += step;
+            }
+            emit(to.x, to.y);
+            untilSample = distance - length;
+            if (untilSample <= step * 1e-10) untilSample = step;
+        }
+        end();
+        return segments;
     }
 
     crossY_sync(params, then) {
