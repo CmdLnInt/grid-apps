@@ -78,7 +78,9 @@ export function menu() {
     _____:               newGroup(LANG.td_tapr),
     toolTaperAngle:      newInput('angle', { convert: toFloat }),
     toolTaperTip:        newInput('tip', { convert: toFloat }),
-    // toolTaperAngle:     $('tool-tangle'),
+    _____:               newGroup('bull nose', null, { show: () => ui.toolType.value === 'bullnose' }),
+    toolCornerRadius:    newInput('corner radius R1', { convert: toFloat, show: () => ui.toolType.value === 'bullnose' }),
+    toolBottomRadius:    newInput('bottom radius R2', { convert: toFloat, action: updateTool, title: '0 for a flat bottom', show: () => ui.toolType.value === 'bullnose' }),
 
     toolsSave:          $('tools-save'),
     toolsClose:         $('tools-close'),

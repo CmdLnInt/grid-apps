@@ -500,6 +500,8 @@ export function init_input() {
         ui.toolShaftDiam,
         ui.toolShaftLen,
         ui.toolTaperTip,
+        ui.toolCornerRadius,
+        ui.toolBottomRadius,
     ], updateTool);
 
     ui.toolMetric.onclick = updateTool;

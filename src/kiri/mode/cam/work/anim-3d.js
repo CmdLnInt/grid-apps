@@ -283,7 +283,36 @@ function toolUpdate(toolid, send) {
     const tlen = slen + flen; // total tool length
     let { cylinder, sphere } = Instance.Manifold;
     let mesh;
-    if (tool.isBallMill()) {
+    if (tool.isBullNose()) {
+        // Approximate the same radial profile used by contouring with frustums.
+        // Build from the tip up, then center like the other tool meshes.
+        const { radius, rise } = tool.getBullNoseParams();
+        const sections = [];
+        let previousRadius = 0;
+        let previousHeight = 0;
+        for (let i = 1; i <= 64; i++) {
+            const nextRadius = radius * i / 64;
+            const height = tool.bullNoseHeight(nextRadius);
+            if (height > previousHeight) {
+                sections.push(cylinder(height - previousHeight, previousRadius, nextRadius, 64, false)
+                    .translate(0, 0, previousHeight));
+            }
+            previousRadius = nextRadius;
+            previousHeight = height;
+        }
+        if (flen > rise) sections.push(cylinder(flen - rise, frad, frad, 64, false).translate(0, 0, rise));
+        if (slen > 0) sections.push(cylinder(slen, srad, srad, 64, false).translate(0, 0, flen));
+        mesh = sections.shift();
+        for (const section of sections) {
+            const combined = mesh.add(section);
+            mesh.delete();
+            section.delete();
+            mesh = combined;
+        }
+        const centered = mesh.translate(0, 0, -tlen / 2);
+        mesh.delete();
+        mesh = centered;
+    } else if (tool.isBallMill()) {
         mesh = cylinder(tlen - frad * 2, frad, frad, 20, true)
             .add(sphere(frad, 20).translate(0, 0, -(tlen - frad * 2) / 2))
             .add(cylinder(slen, srad, srad, 20, true).translate(0, 0, flen / 2));

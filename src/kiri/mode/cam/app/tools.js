@@ -46,6 +46,8 @@ function selectTool(tool) {
         toolFluteLen: selectedTool.flute_len,
         toolTaperAngle: selectedTool.taper_angle,
         toolTaperTip: selectedTool.taper_tip,
+        toolCornerRadius: selectedTool.corner_radius || 0,
+        toolBottomRadius: selectedTool.bottom_radius || 0,
     },{
         toolName: ui.toolName,
         toolType: ui.toolType,
@@ -57,6 +59,8 @@ function selectTool(tool) {
         toolFluteLen: ui.toolFluteLen,
         toolTaperAngle: ui.toolTaperAngle,
         toolTaperTip: ui.toolTaperTip,
+        toolCornerRadius: ui.toolCornerRadius,
+        toolBottomRadius: ui.toolBottomRadius,
     });
 
     if (tool.type === 'tapermill' || tool.type === 'taperball') {
@@ -70,6 +74,7 @@ function selectTool(tool) {
         ui.toolTaperAngle.value = selectedTool.taper_angle = 0;
     }
 
+    api.uc.refresh();
     renderTool(tool);
 }
 
@@ -87,6 +92,8 @@ export function updateTool(ev) {
         toolFluteLen: selectedTool.flute_len,
         toolTaperAngle: selectedTool.taper_angle,
         toolTaperTip: selectedTool.taper_tip,
+        toolCornerRadius: selectedTool.corner_radius || 0,
+        toolBottomRadius: selectedTool.bottom_radius || 0,
     };
 
     api.util.ui2rec(changed,{
@@ -100,6 +107,8 @@ export function updateTool(ev) {
         toolFluteLen: ui.toolFluteLen,
         toolTaperAngle: ui.toolTaperAngle,
         toolTaperTip: ui.toolTaperTip,
+        toolCornerRadius: ui.toolCornerRadius,
+        toolBottomRadius: ui.toolBottomRadius,
     });
 
     selectedTool.name = changed.toolName;
@@ -112,6 +121,17 @@ export function updateTool(ev) {
     selectedTool.flute_len = changed.toolFluteLen;
     selectedTool.taper_angle = changed.toolTaperAngle;
     selectedTool.taper_tip = changed.toolTaperTip;
+    selectedTool.corner_radius = Math.min(selectedTool.flute_diam / 2, Math.max(0, changed.toolCornerRadius || 0));
+    selectedTool.bottom_radius = changed.toolBottomRadius > 0
+        ? Math.max(selectedTool.flute_diam / 2, changed.toolBottomRadius) : 0;
+    if (selectedTool.type === 'bullnose') {
+        const inst = new Tool({ ...settings(), tools: [selectedTool] }, selectedTool.id);
+        selectedTool.flute_len = Math.max(selectedTool.flute_len, inst.getBullNoseParams().rise / inst.unitScale());
+        ui.toolFluteLen.value = selectedTool.flute_len;
+    }
+    ui.toolCornerRadius.value = selectedTool.corner_radius;
+    ui.toolBottomRadius.value = selectedTool.bottom_radius;
+    api.uc.refresh();
 
     if (selectedTool.type === 'tapermill' || selectedTool.type === 'taperball') {
         const rad = (selectedTool.flute_diam - selectedTool.taper_tip) / 2;
@@ -168,8 +188,8 @@ function renderTool(tool) {
         let off = { x: pad, y: pad };
 
         // Create Tool instance and generate profile
-        const toolInst = new Tool(settings(), tool.id);
-        const resolution = (toolInst.maxDiameter() / toolInst.unitScale()) / 100;
+        const toolInst = new Tool({ ...settings(), tools: [tool] }, tool.id);
+        const resolution = toolInst.maxDiameter() / 100;
         toolInst.generateProfile(resolution);
 
         const profile = toolInst.profile;
@@ -227,7 +247,7 @@ function renderTool(tool) {
             }});
 
             // shaft
-            parts.push({ line: {
+            if (Math.abs(p.x) <= toolInst.shaftDiameter() / 2) parts.push({ line: {
                 x1: x,
                 x2: x,
                 y1: y2,

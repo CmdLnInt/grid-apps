@@ -108,6 +108,33 @@ class Tool {
         return this.tool.type === "ballmill";
     }
 
+    isBullNose() {
+        return this.tool.type === "bullnose";
+    }
+
+    // Tangent circular arcs: corner R1 and spherical bottom R2.
+    // R2=0 gives a conventional bull nose with a flat bottom.
+    getBullNoseParams() {
+        const radius = this.fluteDiameter() / 2;
+        const corner = Math.min(radius, Math.max(0, (this.tool.corner_radius || 0) * this.unitScale()));
+        const bottom = this.tool.bottom_radius > 0
+            ? Math.max(radius, this.tool.bottom_radius * this.unitScale()) : 0;
+        const center = radius - corner;
+        const rise = bottom > corner
+            ? bottom - Math.sqrt(Math.max(0, (bottom - corner) ** 2 - center ** 2)) : corner;
+        const join = bottom > corner ? bottom * center / (bottom - corner) : center;
+        return { radius, corner, bottom, center, rise, join };
+    }
+
+    bullNoseHeight(distance) {
+        const { corner, bottom, center, rise, join } = this.getBullNoseParams();
+        if (distance <= join) {
+            // Rationalized form avoids cancellation for very large R2.
+            return bottom ? distance ** 2 / (bottom + Math.sqrt(Math.max(0, bottom ** 2 - distance ** 2))) : 0;
+        }
+        return rise - Math.sqrt(Math.max(0, corner ** 2 - (distance - center) ** 2));
+    }
+
     isTaperMill() {
         return this.tool.type === "tapermill";
     }
@@ -173,7 +200,9 @@ class Tool {
                     maxo = Math.max(maxo, dx, dy);
                     // flute offset points
                     let z_offset = 0;
-                    if (ball) {
+                    if (this.isBullNose()) {
+                        z_offset = -this.bullNoseHeight(dist_from_center * resolution);
+                    } else if (ball) {
                         let ball_rad_sq = dist_from_center * dist_from_center;
                         let ball_rpixsq = pix_fl_rad_float * pix_fl_rad_float;
                         z_offset = Math.sqrt(ball_rpixsq - ball_rad_sq) * resolution - flute_rad;

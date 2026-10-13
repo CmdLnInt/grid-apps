@@ -130,6 +130,7 @@ const LISTS = {
     camtool: [
         { name: "flat end",   id: "endmill" },
         { name: "ball end",   id: "ballmill" },
+        { name: "bull nose",  id: "bullnose" },
         { name: "taper tip",  id: "tapermill" },
         { name: "taper ball", id: "taperball" },
         { name: "drill bit",  id: "drill" },

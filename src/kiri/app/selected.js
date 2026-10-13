@@ -563,6 +563,8 @@ function input_binding(ui) {
         ui.toolShaftDiam,  updateTool,
         ui.toolShaftLen,   updateTool,
         ui.toolTaperTip,   updateTool,
+        ui.toolCornerRadius,   updateTool,
+        ui.toolBottomRadius,   updateTool,
         ui.toolTaperAngle, updateTool,
         $('rot_x'),        parse_as_float,
         $('rot_y'),        parse_as_float,
