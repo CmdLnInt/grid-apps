@@ -3,6 +3,9 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
 
+globalThis.self ??= globalThis;
+const { generateBoardPaths } = await import('../src/kiri/mode/cam/core/curved-path.js');
+
 // Execute the actual Topo/Probe/Trace code without loading the browser-only
 // geometry dependency graph. These doubles only supply polygon storage,
 // rectangular point-in-polygon tests, and slice/box containers.
@@ -13,12 +16,25 @@ const box = (minX, minY, maxX, maxY) => ({
     expandByVector(v) { this.min.x -= v.x; this.min.y -= v.y; this.max.x += v.x; this.max.y += v.y; return this; }
 });
 const context = vm.createContext({
+    generateBoardPaths,
+    setTimeout,
     THREE: { Vector3: class { constructor(x, y, z) { Object.assign(this, { x, y, z }); } } },
     self: { kiri_worker: { minions: { running: true, broadcast() { throw Error('prototype must not dispatch minions'); } } } },
     newPoint: (x, y, z = 0) => ({ x, y, z, isInPolygon(p) {
+        if (p.points?.length) {
+            let inside = false;
+            for (let i = 0; i < p.points.length; i++) {
+                const a = p.points[i], b = p.points[(i + 1) % p.points.length];
+                const dx = b.x - a.x, dy = b.y - a.y;
+                const t = Math.max(0, Math.min(1, ((x - a.x) * dx + (y - a.y) * dy) / (dx * dx + dy * dy || 1)));
+                if (Math.hypot(x - a.x - dx * t, y - a.y - dy * t) < 1e-6) return true;
+                if ((a.y > y) !== (b.y > y) && x < a.x + (b.x - a.x) * (y - a.y) / (b.y - a.y)) inside = !inside;
+            }
+            return inside;
+        }
         return x >= p.min.x && x <= p.max.x && y >= p.min.y && y <= p.max.y;
     } }),
-    newPolygon: () => ({ points: [], setOpen() { this.open = true; return this; },
+    newPolygon: (points = []) => ({ points: [...points], setOpen() { this.open = true; return this; },
         push(p) { this.points.push(p); }, get length() { return this.points.length; } }),
     newSlice: z => ({ z, output() {
         return { setLayer() { return this; }, addPolys() { return this; } };
@@ -108,9 +124,12 @@ test('prototype produces camLines with neither axis enabled and no minion dispat
     const newslices = [];
     await topo.contour({ minX: 10, maxX: 17, minY: -4, maxY: 0, boundsX: 7, boundsY: 4,
         box: box(10, -4, 17, 0), partOff: 0, resolution: 1, density: 1,
-        contourX: false, contourY: false, curvedPathPrototype: true, newslices, leave: 0 }, () => {});
-    assert.equal(newslices.length, 1);
-    assert.ok(newslices[0].camLines[0].length >= 65);
+        contourX: false, contourY: false, curvedPathPrototype: true, newslices, leave: 0,
+        prototypeVertices: [10,-4,0,17,-4,0,17,0,0,10,-4,0,17,0,0,10,0,0],
+        prototypeStepover: 1, prototypeSafetyMargin: 0.2 }, () => {});
+    assert.equal(newslices.length, 9);
+    assert.ok(newslices.every(slice => slice.camLines[0].length >= 2));
+    assert.ok(newslices[0].camLines[0].points.every(p => p.x === 13.5));
     assert.match(source, /if \(webGPU && !contour\.nogpu && !curvedPathPrototype\)/);
     const disabled = [];
     await topo.contour({ contourX: false, contourY: false, newslices: disabled }, () => {});
@@ -274,9 +293,13 @@ context.THREE.Box2 = class { constructor() { return box(0, 0, 0, 0); } };
 vm.runInContext('Number.prototype.round = function(n) { return Math.round(this * 10 ** n) / 10 ** n; };', context);
 
 function cacheState() {
-    const bounds = { min: { x: -10, y: -3, z: 0 }, max: { x: 10.4, y: 3.4, z: 20 },
+    const bounds = { min: { x: -10, y: -3, z: 0 }, max: { x: 10.4, y: 40, z: 20 },
         clone() { return { min: { ...this.min }, max: { ...this.max } }; } };
-    const widget = { id: 'cache-regression', bounds, getBoundingBox() { return this.bounds; } };
+    const widget = { id: 'cache-regression', bounds, getBoundingBox() { return this.bounds; },
+        getGeoVertices() {
+            const { min, max } = this.bounds;
+            return [min.x,min.y,0,max.x,min.y,0,max.x,max.y,0,min.x,min.y,0,max.x,max.y,0,min.x,max.y,0];
+        } };
     const settings = { controller: { units: 'mm', animesh: 1, webGPU: false },
         process: { camTabsHeight: 0 }, tools: [{ id: 1, type: 'bullnose', metric: true,
             flute_diam: 4, flute_len: 10, shaft_diam: 2, shaft_len: 10,
@@ -309,8 +332,9 @@ async function generateCached(state, contourOverrides = {}) {
 }
 function legacyRaster(state) {
     const { min, max } = state.widget.bounds;
-    return { tolerance: 0, diameter: 4, resolution: 1, stepsX: 21, stepsY: 7,
-        bounds: state.widget.getBoundingBox().clone(), data: new Float32Array(147).fill(50),
+    const stepsX = Math.ceil(max.x - min.x), stepsY = Math.ceil(max.y - min.y);
+    return { tolerance: 0, diameter: 4, resolution: 1, stepsX, stepsY,
+        bounds: state.widget.getBoundingBox().clone(), data: new Float32Array(stepsX * stepsY).fill(50),
         raster: false, box: box(min.x, min.y, max.x, max.y), profile: new Float32Array([0, 0, 0]) };
 }
 function assertMatchedProfile(topo, state) {
@@ -377,4 +401,156 @@ test('cache regression: current tool geometry and workarea are honored on each p
     assert.equal(second.probe.params.minX, -11);
     assert.equal(second.probe.params.zMin, 2.0001);
     assert.equal(second.builds[0].zMin, 2.0001);
+});
+
+test('stage 2 projects every ordered pass with Z/leave and splits at clipping exclusions', async () => {
+    const {trace}=setup({minX:-40,minY:0,boundsX:80,boundsY:240,stepsX:41,stepsY:121,
+        resolution:2,data:new Float32Array(41*121).fill(3)},
+        {box:box(-40,0,40,240),resolution:2,density:1,leave:0.25});
+    const topo=new Topo();topo.trace=trace;
+    const outline=[{x:0,y:0},{x:40,y:120},{x:0,y:240},{x:-40,y:120}];
+    const vertices=[];
+    for(let i=1;i<outline.length-1;i++)for(const p of [outline[0],outline[i],outline[i+1]])vertices.push(p.x,p.y,1);
+    const newslices=[];
+    await topo.contour({minX:-40,maxX:40,minY:0,maxY:240,boundsX:80,boundsY:240,
+        box:box(-40,0,40,240),partOff:0,resolution:2,density:1,leave:0.25,
+        clipTo:[box(-40,0,40,90),box(-40,150,40,240)],
+        contourX:false,contourY:false,curvedPathPrototype:true,prototypeVertices:vertices,
+        prototypeStepover:10,prototypeSafetyMargin:10,newslices},()=>{});
+    assert.equal(newslices.length,9);
+    for(let i=0;i<newslices.length;i++) {
+        const slice=newslices[i];assert.equal(slice.z,i);assert.equal(slice.camLines.length,2);
+        for(const segment of slice.camLines) {
+            assert.ok(segment.open);
+            assert.ok(segment.points.every(p=>p.z===3.25));
+            assert.ok(segment.points.every(p=>p.y<=90 || p.y>=150));
+            assert.ok(segment.points[0].y<segment.points.at(-1).y === (i%2===0));
+        }
+        assert.equal(slice.camLines[0].points[0].y<slice.camLines[1].points[0].y,i%2===0);
+    }
+});
+
+test('stage 2 extracts only the current widget mesh, excluding stock/tabs/unrelated widgets', async () => {
+    const state=cacheState();let meshCalls=0;
+    const getVertices=state.widget.getGeoVertices;
+    state.widget.getGeoVertices=function(options){
+        meshCalls++;assert.equal(options.unroll,true);assert.equal(options.translate,true);
+        return getVertices.call(this);
+    };
+    state.widget.getTabVertices=()=>{throw Error('tabs must not be projected');};
+    state.widgets=[{getGeoVertices(){throw Error('unrelated widget must not be projected');}}];
+    state.settings.stock={getGeoVertices(){throw Error('stock must not be projected');}};
+    const result=await generateCached(state);
+    assert.equal(meshCalls,1);
+    assert.equal(result.contourParams.prototypeVertices.length,18);
+    await generateCached(state,{curvedPathPrototype:false});
+    assert.equal(meshCalls,1);
+});
+
+test('prototype rejects X-long boards before raster work; normal contour stays unchanged', async () => {
+    const state=cacheState();state.widget.bounds.max.y=3.4;
+    const topo=new CacheDiagnosticTopo();
+    await assert.rejects(topo.generate({state,contour:{axis:'X',tool:1,tolerance:1,step:.2,
+        inside:true,curvedPathPrototype:true},onupdate(){},ondone(){}}),/length along Y \(blue axis\)/);
+    assert.equal(topo.builds.length,0);
+    const normal=await generateCached(state,{curvedPathPrototype:false,tolerance:1});
+    assert.equal(normal.builds.length,1);
+});
+
+test('prototype raster bypasses minion queue and yields between batches; normal raster keeps queue', async () => {
+    const originalWorker=context.self.kiri_worker,originalSlicer=context.topo_slicer,
+        originalBox=context.THREE.Box2,originalSlice=context.newSlice;
+    const calls={queued:0,cached:0,cleared:0};
+    context.self.kiri_worker={
+        minions:{running:3,queue(work,done){calls.queued++;done({box:{min:{x:0,y:0},max:{x:1,y:1}}});}},
+        dispatch:{putCache(data,send){calls.cached++;send.done({});},clearCache(data,send){calls.cleared++;send.done({});}}
+    };
+    context.topo_slicer=class {
+        setFromArray(){return this;}
+        slice(){return [{z:0,index:0,lines:[{p1:{x:0,y:0,z:3,swapped:true},p2:{x:0,y:1,z:4,swapped:true}}]}];}
+    };
+    context.THREE.Vector2=class {constructor(x,y){Object.assign(this,{x,y});}};
+    context.THREE.Box2=class {constructor(min={x:0,y:0},max={x:0,y:0}){
+        const b=box(min.x,min.y,max.x,max.y);
+        b.expandByPoint=p=>{b.min.x=Math.min(b.min.x,p.x);b.min.y=Math.min(b.min.y,p.y);b.max.x=Math.max(b.max.x,p.x);b.max.y=Math.max(b.max.y,p.y);};
+        b.union=()=>b;return b;
+    }};
+    context.newSlice=()=>({output(){throw Error('prototype must not allocate unused raster debug output');}});
+    const widget={getGeoVertices:()=>({toShared:()=>Float32Array.from([0,0,1,1,0,1,0,1,1])})};
+    const params=()=>({box:new context.THREE.Box2(),resolution:.25,stepsY:4,minY:0,maxY:1,zMin:0.0001,
+        flatness:.001,data:new Float32Array(16),curvedPathPrototype:true});
+    try {
+        let yielded=false;setTimeout(()=>{yielded=true;},0);
+        const prototype=params();let progress=0;
+        await new Topo().raster(widget,prototype,()=>progress++);
+        assert.equal(calls.queued,0);assert.equal(calls.cached,0);assert.equal(calls.cleared,0);
+        assert.ok(progress>0);assert.ok(yielded);assert.equal(prototype.data[0],3);
+        const normal=params();normal.curvedPathPrototype=false;
+        await new Topo().raster(widget,normal,()=>{});
+        assert.equal(calls.queued,1);assert.equal(calls.cached,1);assert.equal(calls.cleared,1);
+    } finally {
+        context.self.kiri_worker=originalWorker;context.topo_slicer=originalSlicer;
+        context.THREE.Box2=originalBox;context.newSlice=originalSlice;
+    }
+});
+
+test('rail-apex Z lower bounds interpolate during resampling without lowering compensation',()=>{
+    const {trace}=setup({}, {leave:.5});
+    const path=[{x:11,y:-2,minZ:5},{x:15,y:-2,minZ:9}];
+    const out=trace.followPath_sync(path)[0].points;
+    assert.equal(out[0].z,5.5);assert.equal(out.at(-1).z,9.5);
+    const middle=out.find(p=>p.x===13);assert.equal(middle.z,7.5);
+    const raised=setup({data:new Float32Array(40).fill(20)},{leave:.5}).trace.followPath_sync(path);
+    assert.ok(raised[0].points.every(p=>p.z===20.5));
+});
+
+test('rail-apex contour permits exterior cutter centres in the padded raster while retaining Z floors',async()=>{
+    const {trace}=setup({minX:-45,minY:-125,stepsX:91,stepsY:251,resolution:1,
+        data:new Float32Array(91*251).fill(0)},
+        {box:box(-45,-125,45,125),resolution:1,density:1});
+    const vertices=[];
+    // A rectangular projection with side apex height Z=10 and upper deck Z=20.
+    for(const z of [10,20])vertices.push(-40,-120,z,40,-120,z,40,120,z,-40,-120,z,40,120,z,-40,120,z);
+    const topo=new Topo();topo.trace=trace;const newslices=[];
+    await topo.contour({minX:-45,maxX:45,minY:-125,maxY:125,boundsX:90,boundsY:250,
+        box:box(-40,-120,40,120),partOff:0,resolution:1,density:1,leave:0,
+        clipTo:[box(-40,-120,40,120)],curvedPathPrototype:true,
+        prototypeVertices:vertices,prototypeStepover:10,prototypeSafetyMargin:10,
+        prototypeRailApex:true,prototypeToolRadius:4,prototypeEdgeHeight:2,rasterPadding:5,newslices},()=>{});
+    const pts=newslices.flatMap(s=>s.camLines.flatMap(p=>p.points));
+    assert.ok(pts.some(p=>p.x>40));assert.ok(pts.some(p=>p.x<-40));
+    assert.ok(pts.every(p=>p.z>=18)); // widest-point tie chooses deck-side apex
+});
+
+test('rail-apex raster planes use padded origin rather than the mesh origin',async()=>{
+    const oldWorker=context.self.kiri_worker,oldSlicer=context.topo_slicer;
+    const ranges=[];
+    context.self.kiri_worker={minions:{running:0},dispatch:{}};
+    context.topo_slicer=class {
+        setFromArray(vertices,range){ranges.push(range);return this;}
+        slice(){return [];}
+    };
+    const widget={getGeoVertices:()=>({toShared:()=>Float32Array.from([0,0,1,1,0,1,0,1,1])})};
+    try {
+        await new Topo().raster(widget,{box:box(-2,0,3,1),resolution:1,stepsY:2,
+            minX:-2,maxX:3,minY:0,maxY:1,data:new Float32Array(10),
+            curvedPathPrototype:true,curvedPathRailApex:true},()=>{});
+        assert.equal(ranges[0].min,-2);assert.equal(ranges[0].max,3);assert.equal(ranges[0].index,0);
+    } finally {context.self.kiri_worker=oldWorker;context.topo_slicer=oldSlicer;}
+});
+
+test('rail-apex physical footprint uses true XY offsets and leaves rounded sampling unchanged',()=>{
+    const tool=new Tool({controller:{units:'mm'},tools:[{id:1,type:'bullnose',metric:true,
+        flute_diam:4,flute_len:10,shaft_diam:1,shaft_len:5,corner_radius:.6,bottom_radius:20,taper_tip:0}]},1);
+    const data=new Float32Array(40).fill(0);data[4*5+2]=11;
+    const {probe,trace}=setup({data,profile:tool.generateProfile(1).profile});
+    const x=12.4,y=-2;
+    const expected=11-tool.bullNoseHeight(1.6);
+    assert.ok(Math.abs(probe.toolAtPhysicalXY(x,y,tool)-expected)<1e-7);
+    const normal=trace.followPath_sync([{x,y},{x:x+.01,y}])[0].points[0].z;
+    assert.equal(normal,probe.toolAtZ(2,2));
+    trace.physicalTool=tool;
+    const physical=trace.followPath_sync([{x,y},{x:x+.01,y}])[0].points[0].z;
+    assert.ok(Math.abs(physical-expected)<1e-7);
+    assert.ok(physical>normal);
 });

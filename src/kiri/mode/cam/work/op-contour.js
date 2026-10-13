@@ -156,6 +156,16 @@ class OpContour extends CamOp {
             depthData.appendAll(polys);
         }
 
+        // Preserve the prototype's stringer-to-rail order and alternating
+        // direction, including multiple segments produced by clipping.
+        if (op.curvedPathPrototype === true) {
+            for (const entry of depthData) {
+                polyEmit(entry.poly);
+                newLayer();
+            }
+            return;
+        }
+
         tip2tipEmit(depthData, printPoint, (el, point) => {
             let poly = el.poly;
             if (poly.last() === point) {

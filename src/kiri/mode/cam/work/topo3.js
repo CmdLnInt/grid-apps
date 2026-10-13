@@ -7,6 +7,7 @@ import { newSlice } from '../../../core/slice.js';
 import { Slicer as topo_slicer } from './slicer-topo.js';
 import { polygons as POLY } from '../../../../geo/polygons.js';
 import { Tool } from '../core/tool.js';
+import { generateBoardPaths } from '../core/curved-path.js';
 
 const RAD2DEG = 180 / Math.PI;
 const DEG2RAD = Math.PI / 180;
@@ -26,7 +27,12 @@ export class Topo {
             contourX = axis === "x",
             contourY = axis === "y",
             curvedPathPrototype = contour.curvedPathPrototype === true,
-            bounds = widget.getBoundingBox().clone(),
+            curvedPathRailApex = curvedPathPrototype && contour.curvedPathRailApex === true,
+            tool = new Tool(settings, contour.tool),
+            rasterPadding = curvedPathRailApex ? tool.maxDiameter() / 2 + 2 : 0,
+            bounds = curvedPathRailApex
+                ? widget.getBoundingBox().clone().expandByVector(new THREE.Vector3(rasterPadding, rasterPadding, 0))
+                : widget.getBoundingBox().clone(),
             tolerance = contour.tolerance,
             flatness = contour.flatness || (tolerance / 100),
             minX = bounds.min.x,
@@ -40,7 +46,6 @@ export class Topo {
             inside = contour.inside,
             density = 1 + (contour.reduction || 0),
             resolution = (tolerance ? tolerance : 1 / Math.sqrt(animesh / (boundsX * boundsY))).round(5),
-            tool = new Tool(settings, contour.tool),
             toolOffset = tool.generateProfile(resolution).profile,
             toolDiameter = tool.fluteDiameter(),
             toolStep = toolDiameter * contour.step,
@@ -82,6 +87,13 @@ export class Topo {
             partOff = inside ? 0 : toolDiameter / 2 + resolution,
             gridDelta = Math.floor(partOff / resolution),
             debug_clips = true;
+
+        if (curvedPathRailApex && !tool.isBullNose()) {
+            throw new Error('curved rail-apex prototype currently requires a bull nose cutter');
+        }
+        if (curvedPathPrototype && boundsY <= boundsX) {
+            throw new Error('curved path prototype requires board length along Y (blue axis); rotate the board 90 degrees around Z');
+        }
 
         // Prototype operations must neither consume nor replace the cache used
         // by existing Contour X/Y operations.
@@ -370,11 +382,17 @@ export class Topo {
             contourX
         });
 
+        if (curvedPathRailApex) trace.physicalTool = tool;
+
         if (topo.raster) {
             const box = topo.box = new THREE.Box2();
 
             const params = {
                 resolution,
+                curvedPathPrototype,
+                curvedPathRailApex,
+                minX,
+                maxX,
                 curvesOnly,
                 flatness,
                 stepsY,
@@ -409,6 +427,13 @@ export class Topo {
             contourX,
             contourY,
             curvedPathPrototype,
+            prototypeVertices: curvedPathPrototype ? widget.getGeoVertices({ unroll: true, translate: true }) : undefined,
+            prototypeStepover: contour.curvedPathStepover ?? 5,
+            prototypeSafetyMargin: contour.curvedPathSafetyMargin ?? 10,
+            prototypeRailApex: curvedPathRailApex,
+            prototypeToolRadius: tool.fluteDiameter() / 2,
+            prototypeEdgeHeight: curvedPathRailApex ? tool.getBullNoseParams().rise : undefined,
+            rasterPadding,
             density,
             clipTo,
             clipTab,
@@ -443,6 +468,12 @@ export class Topo {
             range.max = Math.max(range.max, x);
         }
 
+        if (params.curvedPathRailApex) {
+            // Keep the padded raster's pixel origin aligned with the slice
+            // planes; do not label model-origin slices as padded-origin cells.
+            range.min = params.minX;
+            range.max = params.maxX;
+        }
         const shards = Math.ceil(Math.min(25, vertices.length / 27000));
         const step = (range.max - range.min) / shards;
 
@@ -461,7 +492,7 @@ export class Topo {
 
         let complete = 0;
         // define sharded ranges
-        if (minions.running > 1) {
+        if (minions.running > 1 && !params.curvedPathPrototype) {
 
             dispatch.putCache({ key: widget.id, data: vertices }, {
                 done: data => {
@@ -525,12 +556,17 @@ export class Topo {
                             box,
                             lines: rec.lines,
                             gridx: rec.index,
-                            slice
+                            slice: params.curvedPathPrototype ? undefined : slice
                         });
 
                         return slice;
                     });
                 onupdate(++complete, slices.length, "raster");
+                if (params.curvedPathPrototype) {
+                    // Let the worker deliver progress/cancellation messages
+                    // between batches instead of waiting on the minion queue.
+                    await new Promise(resolve => setTimeout(resolve, 0));
+                }
             }
 
         }
@@ -544,30 +580,40 @@ export class Topo {
         const { gridDelta, resolution, density, partOff, toolStep, contourX, contourY } = params;
         const { clipTo, clipTab, clipTabZ, tabHeight, newslices, leave } = params;
 
-        // Opt-in CPU experiment: one longitudinal sine path in model XY space.
-        // Keep this before the scanline-count guard so neither axis is required.
+        // Prototype geometry comes only from this operation's widget, never
+        // stock, tabs, a global widget collection, or the combined shadow.
         if (params.curvedPathPrototype) {
+            onupdate(0, 1, "project board outline");
+            const generated = generateBoardPaths(params.prototypeVertices, {
+                stepover: params.prototypeStepover,
+                safetyMargin: params.prototypeSafetyMargin,
+                sampleStep: resolution * density,
+                railApex: params.prototypeRailApex,
+                toolRadius: params.prototypeToolRadius,
+                edgeHeight: params.prototypeEdgeHeight
+            });
+            const insetClip = newPolygon(generated.clipOutline.map(p => newPoint(p.x, p.y, 0)));
             trace.init({
-                box: params.box.clone().expandByVector(new THREE.Vector3(partOff, partOff, 0)),
-                leave, clipTo, clipTab, clipTabZ, tabHeight,
+                box: params.box.clone().expandByVector(new THREE.Vector3(
+                    params.prototypeRailApex ? params.rasterPadding : partOff,
+                    params.prototypeRailApex ? params.rasterPadding : partOff, 0)),
+                // Apex cutter centres intentionally leave the board/stock XY
+                // mask; use the explicit cutter-centre envelope instead.
+                leave, clipTo: params.prototypeRailApex ? undefined : clipTo, clipWithin: [insetClip], clipTab, clipTabZ, tabHeight,
                 resolution, density, concurrent: false
             });
             try {
-                const path = Array.from({ length: 65 }, (_, i) => {
-                    const t = i / 64;
-                    return {
-                        x: minX + boundsX * (0.1 + 0.8 * t),
-                        y: minY + boundsY * (0.5 + 0.25 * Math.sin(2 * Math.PI * t))
-                    };
-                });
-                onupdate(0, 1, "curved path prototype");
-                const segments = trace.followPath_sync(path);
-                if (segments.length) {
-                    const slice = newSlice(0);
-                    slice.camLines = segments;
-                    newslices.push(slice);
+                this.prototypePaths = generated;
+                onupdate(0, generated.paths.length, "stringer-to-rail prototype");
+                for (let i = 0; i < generated.paths.length; i++) {
+                    const segments = trace.followPath_sync(generated.paths[i].points);
+                    if (segments.length) {
+                        const slice = newSlice(i);
+                        slice.camLines = segments;
+                        newslices.push(slice);
+                    }
+                    onupdate(i + 1, generated.paths.length, "stringer-to-rail prototype");
                 }
-                onupdate(1, 1, "curved path prototype");
             } finally {
                 trace.cleanup();
             }
@@ -688,6 +734,35 @@ export class Topo {
 }
 
 export class Probe {
+
+    // Rail-apex centres lie outside the model, where rounding the centre to a
+    // pixel can shift the whole cutter footprint into the steep deck surface.
+    // Evaluate the bull nose at each raster cell's actual physical distance.
+    toolAtPhysicalXY(px, py, tool) {
+        const { data, resolution, minX, minY, stepsX, stepsY, zMin } = this.params;
+        const fluteRadius = tool.fluteDiameter() / 2;
+        const radius = Math.max(fluteRadius, tool.shaftDiameter() / 2);
+        const fluteLength = tool.fluteLength();
+        const { corner, bottom, center, rise, join } = tool.getBullNoseParams();
+        const x0 = Math.max(0, Math.ceil((px - radius - minX) / resolution));
+        const x1 = Math.min(stepsX - 1, Math.floor((px + radius - minX) / resolution));
+        const y0 = Math.max(0, Math.ceil((py - radius - minY) / resolution));
+        const y1 = Math.min(stepsY - 1, Math.floor((py + radius - minY) / resolution));
+        let height = zMin;
+        for (let x = x0; x <= x1; x++) {
+            for (let y = y0; y <= y1; y++) {
+                const distance = Math.hypot(minX + x * resolution - px, minY + y * resolution - py);
+                if (distance > radius) continue;
+                let offset;
+                if (distance > fluteRadius) offset = fluteLength;
+                else if (distance <= join) offset = bottom
+                    ? distance ** 2 / (bottom + Math.sqrt(Math.max(0, bottom ** 2 - distance ** 2))) : 0;
+                else offset = rise - Math.sqrt(Math.max(0, corner ** 2 - (distance - center) ** 2));
+                height = Math.max(height, (data[x * stepsY + y] || zMin) - offset);
+            }
+        }
+        return height;
+    }
 
     constructor(params) {
 
@@ -912,7 +987,7 @@ export class Trace {
      * Keep vertices as well as arc-length samples to preserve XY corners.
      */
     followPath_sync(path) {
-        const { box, resolution, density, leave = 0, clipTo, clipTab, tabHeight } = this.cross;
+        const { box, resolution, density, leave = 0, clipTo, clipWithin, clipTab, tabHeight } = this.cross;
         const { minX, minY, stepsX, stepsY, resolution: rasterResolution } = this.probe.params;
         const pixelSize = rasterResolution ?? resolution;
         const step = resolution * density;
@@ -925,7 +1000,7 @@ export class Trace {
             if (polygon.length > 1) segments.push(polygon);
             polygon = newPolygon().setOpen();
         };
-        const emit = (x, y) => {
+        const emit = (x, y, minZ) => {
             // Raster cells are written at min + index * resolution, not at
             // index * bounds/steps (which differs when bounds are rounded up).
             const gridx = Math.round((x - minX) / pixelSize);
@@ -938,11 +1013,15 @@ export class Trace {
                 return;
             }
             const point = newPoint(x, y);
-            if (clipTo && !this.inClip(clipTo, undefined, point)) {
+            if ((clipTo && !this.inClip(clipTo, undefined, point)) ||
+                (clipWithin && !this.inClip(clipWithin, undefined, point))) {
                 end();
                 return;
             }
-            let z = this.probe.toolAtZ(gridx, gridy);
+            let z = this.physicalTool
+                ? this.probe.toolAtPhysicalXY(x, y, this.physicalTool)
+                : this.probe.toolAtZ(gridx, gridy);
+            if (Number.isFinite(minZ)) z = Math.max(z, minZ);
             if (clipTab && clipTab.length && z < tabHeight) {
                 // Reuse the same Z-aware polygon predicate. Evaluate tabs one
                 // at a time so tabZ belongs to a matching tab, including overlaps.
@@ -959,7 +1038,7 @@ export class Trace {
                 throw new Error("followPath_sync requires finite physical XY coordinates");
             }
         }
-        emit(path[0].x, path[0].y);
+        emit(path[0].x, path[0].y, path[0].minZ);
         let untilSample = step;
         for (let i = 1; i < path.length; i++) {
             const from = path[i - 1], to = path[i];
@@ -969,10 +1048,12 @@ export class Trace {
             let distance = untilSample;
             while (distance < length) {
                 const t = distance / length;
-                emit(from.x + dx * t, from.y + dy * t);
+                const minZ = Number.isFinite(from.minZ) && Number.isFinite(to.minZ)
+                    ? from.minZ + (to.minZ - from.minZ) * t : undefined;
+                emit(from.x + dx * t, from.y + dy * t, minZ);
                 distance += step;
             }
-            emit(to.x, to.y);
+            emit(to.x, to.y, to.minZ);
             untilSample = distance - length;
             if (untilSample <= step * 1e-10) untilSample = step;
         }
