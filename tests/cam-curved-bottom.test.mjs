@@ -69,3 +69,12 @@ test('return-flip-only side B seeds once and saves setup; normal flip stays lega
     assert.equal(normal.process.ops.length,1);
     assert.equal(normal.process.ops[0].type,'flip');
 });
+
+test('side B adopts its own calibrated target instead of inheriting deck calibration',()=>{
+    const source={...deck,curvedPathScallopHeight:.05,curvedPathScallopCalibratePasses:61};
+    const [bottom]=createBottomContours([source],[],'X');
+    assert.equal(bottom.curvedPathScallopHeight,undefined);
+    assert.equal(bottom.curvedPathScallopCalibratePasses,undefined);
+    assert.equal(source.curvedPathScallopHeight,.05);
+    assert.equal(source.curvedPathScallopCalibratePasses,61);
+});

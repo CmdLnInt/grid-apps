@@ -4,7 +4,9 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 
 globalThis.self ??= globalThis;
-const { generateBoardPaths, generateBoardOutline } = await import('../src/kiri/mode/cam/core/curved-path.js');
+const { generateBoardPaths, generateBoardOutline, splitOutlineForEndTabs } = await import('../src/kiri/mode/cam/core/curved-path.js');
+
+const { refineScallopPaths, DEFAULT_SCALLOP_HEIGHT } = await import('../src/kiri/mode/cam/core/scallop-path.js');
 
 // Execute the actual Topo/Probe/Trace code without loading the browser-only
 // geometry dependency graph. These doubles only supply polygon storage,
@@ -16,7 +18,7 @@ const box = (minX, minY, maxX, maxY) => ({
     expandByVector(v) { this.min.x -= v.x; this.min.y -= v.y; this.max.x += v.x; this.max.y += v.y; return this; }
 });
 const context = vm.createContext({
-    generateBoardPaths, generateBoardOutline,
+    generateBoardPaths, generateBoardOutline, splitOutlineForEndTabs, refineScallopPaths, DEFAULT_SCALLOP_HEIGHT,
     setTimeout,
     THREE: { Vector3: class { constructor(x, y, z) { Object.assign(this, { x, y, z }); } } },
     self: { kiri_worker: { minions: { running: true, broadcast() { throw Error('prototype must not dispatch minions'); } } } },
@@ -535,7 +537,7 @@ test('deck perimeter is appended after finishing and raises over matching tabs',
         box:box(-40,-120,40,120),partOff:0,resolution:1,density:1,leave:0,
         clipTo:[box(-40,-120,40,120)],curvedPathPrototype:true,
         prototypeVertices:vertices,prototypeStepover:10,prototypeSafetyMargin:10,
-        prototypeOutline:true,prototypeOutlineThrough:0.1,prototypeOutlineClockwise:true,
+        prototypeOutline:true,prototypeOutlineEndMargin:0,prototypeOutlineThrough:0.1,prototypeOutlineClockwise:true,
         clipTab:[Object.assign(box(43,-20,45,20),{z:12})],clipTabZ:[12],tabHeight:12,
         prototypeRailApex:true,prototypeToolRadius:4,prototypeEdgeHeight:2,rasterPadding:5,newslices},()=>{});
     const final = newslices.at(-1);
@@ -613,8 +615,15 @@ test('bottom side defaults to no perimeter while deck and explicit settings reta
     state.settings.tools[0].corner_radius=.5;state.settings.tools[0].bottom_radius=20;
     const b=await generateCached(state,{curvedPathRailApex:true,curvedPathSide:'bottom'});
     assert.equal(b.contourParams.prototypeOutline,false);
+    assert.equal(b.contourParams.prototypeSafetyMargin,0);
+    assert.equal(b.contourParams.prototypeScallop,DEFAULT_SCALLOP_HEIGHT.bottom);
     const a=await generateCached(state,{curvedPathRailApex:true});
     assert.equal(a.contourParams.prototypeOutline,true);
+    assert.equal(a.contourParams.prototypeSafetyMargin,0);
+    assert.equal(a.contourParams.prototypeOutlineEndMargin,10);
+    assert.equal(a.contourParams.prototypeScallop,DEFAULT_SCALLOP_HEIGHT.deck);
+    const disabled=await generateCached(state,{curvedPathRailApex:true,curvedPathScallop:false});
+    assert.equal(disabled.contourParams.prototypeScallop,undefined);
 });
 
 test('flipped asymmetric underside compensation uses bottom rocker rather than deck', () => {
@@ -630,4 +639,47 @@ test('flipped asymmetric underside compensation uses bottom rocker rather than d
         assert.equal(p.z,probe.toolAtZ(x,y));
     }
     assert.ok(points[0].z>points.at(-1).z);
+});
+
+test('production contour appends two open rails and preserves default outline end gaps',async()=>{
+    const {trace}=setup({minX:-125,minY:-45,stepsX:251,stepsY:91,resolution:1,
+        data:new Float32Array(251*91).fill(20)},
+        {box:box(-125,-45,125,45),resolution:1,density:1});
+    const vertices=[];
+    for(const z of [10,20])vertices.push(-120,-40,z,120,-40,z,120,40,z,-120,-40,z,120,40,z,-120,40,z);
+    const topo=new Topo();topo.trace=trace;const newslices=[];
+    await topo.contour({box:box(-120,-40,120,40),partOff:0,resolution:1,density:1,leave:0,
+        curvedPathPrototype:true,prototypeLengthAxis:'X',prototypeVertices:vertices,
+        prototypeStepover:10,prototypeSafetyMargin:0,prototypeRailApex:true,
+        prototypeOutline:true,prototypeToolRadius:4,prototypeEdgeHeight:2,rasterPadding:5,newslices},()=>{});
+    const rails=newslices.at(-1).camLines;
+    assert.equal(rails.length,2);
+    for(const rail of rails) {
+        assert.equal(rail.open,true);
+        assert.ok(rail.points.every(p=>p.x>=-106-1e-6&&p.x<=106+1e-6));
+        assert.ok(Math.abs(rail.points[0].x-rail.points.at(-1).x)>200);
+    }
+    const centre=newslices[0].camLines[0].points;
+    assert.equal(centre[0].x,-120);
+    assert.equal(centre.at(-1).x,120);
+});
+
+test('production contour applies scallop refinement and retains rail end tabs',async()=>{
+    const {trace}=setup({minX:-45,minY:-125,stepsX:91,stepsY:251,resolution:1,
+        data:new Float32Array(91*251).fill(20)},
+        {box:box(-45,-125,45,125),resolution:1,density:1});
+    trace.physicalTool=new Tool({controller:{units:'mm'},tools:[{id:1,type:'bullnose',metric:true,
+        flute_diam:8,flute_len:20,shaft_diam:2,shaft_len:5,corner_radius:1,bottom_radius:20}]},1);
+    const vertices=[];
+    for(const z of [10,20])vertices.push(-40,-120,z,40,-120,z,40,120,z,-40,-120,z,40,120,z,-40,120,z);
+    const topo=new Topo();topo.trace=trace;const newslices=[];
+    await topo.contour({box:box(-40,-120,40,120),partOff:0,resolution:1,density:1,leave:0,
+        curvedPathPrototype:true,prototypeLengthAxis:'Y',prototypeVertices:vertices,
+        prototypeStepover:10,prototypeSafetyMargin:0,prototypeRailApex:true,
+        prototypeScallop:.05,prototypeOutline:true,prototypeToolRadius:4,
+        prototypeEdgeHeight:trace.physicalTool.getBullNoseParams().rise,rasterPadding:5,newslices},()=>{});
+    assert.ok(topo.prototypePaths.paths.length>11);
+    assert.ok(topo.prototypePaths.scallop.worstSampledAdditionalCusp<=.05);
+    assert.equal(newslices.at(-1).camLines.length,2);
+    assert.ok(newslices.every(s=>s.camLines.every(p=>p.points.every(q=>Number.isFinite(q.z)))));
 });

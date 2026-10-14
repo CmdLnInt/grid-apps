@@ -7,7 +7,8 @@ import { newSlice } from '../../../core/slice.js';
 import { Slicer as topo_slicer } from './slicer-topo.js';
 import { polygons as POLY } from '../../../../geo/polygons.js';
 import { Tool } from '../core/tool.js';
-import { generateBoardPaths, generateBoardOutline } from '../core/curved-path.js';
+import { generateBoardPaths, generateBoardOutline, splitOutlineForEndTabs } from '../core/curved-path.js';
+import { refineScallopPaths, DEFAULT_SCALLOP_HEIGHT } from '../core/scallop-path.js';
 
 const RAD2DEG = 180 / Math.PI;
 const DEG2RAD = Math.PI / 180;
@@ -426,7 +427,11 @@ export class Topo {
             curvedPathPrototype,
             prototypeVertices: curvedPathPrototype ? widget.getGeoVertices({ unroll: true, translate: true }) : undefined,
             prototypeStepover: contour.curvedPathStepover ?? 5,
-            prototypeSafetyMargin: contour.curvedPathSafetyMargin ?? 10,
+            prototypeScallop: curvedPathRailApex && contour.curvedPathScallop !== false
+                ? (contour.curvedPathScallopHeight ?? DEFAULT_SCALLOP_HEIGHT[contour.curvedPathSide === "bottom" ? "bottom" : "deck"]) : undefined,
+            prototypeScallopCalibration: contour.curvedPathScallopCalibratePasses,
+            prototypeSafetyMargin: curvedPathRailApex ? (contour.curvedPathFinishingMargin ?? 0) : (contour.curvedPathSafetyMargin ?? 10),
+            prototypeOutlineEndMargin: contour.curvedPathOutlineEndMargin ?? 10,
             prototypeRailApex: curvedPathRailApex,
             prototypeLengthAxis: boundsX > boundsY ? "X" : "Y",
             prototypeOutline: curvedPathRailApex && (contour.curvedPathOutline ?? (contour.curvedPathSide !== "bottom")),
@@ -587,13 +592,40 @@ export class Topo {
             onupdate(0, 1, "project board outline");
             const generated = generateBoardPaths(params.prototypeVertices, {
                 lengthAxis: params.prototypeLengthAxis,
-                stepover: params.prototypeStepover,
+                // A height target determines pass count independently of old
+                // fixed stepover settings copied from the deck operation.
+                stepover: params.prototypeScallop !== undefined
+                    ? Math.max(params.boundsX ?? params.box.max.x-params.box.min.x,
+                        params.boundsY ?? params.box.max.y-params.box.min.y) : params.prototypeStepover,
                 safetyMargin: params.prototypeSafetyMargin,
                 sampleStep: resolution * density,
                 railApex: params.prototypeRailApex,
                 toolRadius: params.prototypeToolRadius,
                 edgeHeight: params.prototypeEdgeHeight
             });
+            if (params.prototypeScallop !== undefined) {
+                const tool = trace.physicalTool;
+                if (!tool) throw new Error('scallop refinement requires the prototype bullnose physical sampler');
+                const raster = trace.probe.params;
+                onupdate(0, 1, "refine scallop spacing");
+                await refineScallopPaths(generated, {
+                    target: params.prototypeScallop, calibratePasses: params.prototypeScallopCalibration, radius: params.prototypeToolRadius,
+                    resolution: raster.resolution,
+                    heightAt: distance => tool.bullNoseHeight(distance),
+                    toolAt: (x,y) => trace.probe.toolAtPhysicalXY(x,y,tool),
+                    surfaceAt: (x,y) => {
+                        const ix=Math.round((x-raster.minX)/raster.resolution);
+                        const iy=Math.round((y-raster.minY)/raster.resolution);
+                        if(ix<0 || iy<0 || ix>=raster.stepsX || iy>=raster.stepsY) return undefined;
+                        const z=raster.data[ix*raster.stepsY+iy];
+                        return z ? z : undefined;
+                    },
+                    yieldProgress: async count => {
+                        onupdate(0, 1, `refine scallop spacing (${count} gaps checked)`);
+                        await new Promise(resolve => setTimeout(resolve,0));
+                    }
+                });
+            }
             const insetClip = newPolygon(generated.clipOutline.map(p => newPoint(p.x, p.y, 0)));
             trace.init({
                 box: params.box.clone().expandByVector(new THREE.Vector3(
@@ -626,16 +658,24 @@ export class Topo {
                         sampleStep: resolution * density, startXY: last[last.length - 1],
                         clockwise: params.prototypeOutlineClockwise
                     });
-                    const polygon = newPolygon().setOpen();
-                    for (const p of points) {
-                        const point = newPoint(p.x, p.y, p.z);
-                        for (const tab of clipTab || []) {
-                            if (trace.inClip([tab], point.z, point)) point.z = Math.max(point.z, trace.tabZ);
+                    const paths = splitOutlineForEndTabs(points, generated.outline, {
+                        lengthAxis: params.prototypeLengthAxis,
+                        margin: params.prototypeOutlineEndMargin ?? 10,
+                        toolRadius: params.prototypeToolRadius
+                    });
+                    const polygons = paths.map(path => {
+                        const polygon = newPolygon().setOpen();
+                        for (const p of path) {
+                            const point = newPoint(p.x, p.y, p.z);
+                            for (const tab of clipTab || []) {
+                                if (trace.inClip([tab], point.z, point)) point.z = Math.max(point.z, trace.tabZ);
+                            }
+                            polygon.push(point);
                         }
-                        polygon.push(point);
-                    }
+                        return polygon;
+                    });
                     const slice = newSlice(generated.paths.length);
-                    slice.camLines = [polygon];
+                    slice.camLines = polygons;
                     slice.prototypeOutline = true;
                     newslices.push(slice);
                     onupdate(1, 1, "deck perimeter prototype");

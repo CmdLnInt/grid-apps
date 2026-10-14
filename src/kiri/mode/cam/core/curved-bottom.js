@@ -12,6 +12,9 @@ export function createBottomContours(ops, otherSide, axis) {
             op.curvedPathSide === 'bottom') continue;
         const bottom = JSON.parse(JSON.stringify(op));
         bottom.curvedPathSide = 'bottom';
+        // The deck's reference count/height is not the underside's finish.
+        delete bottom.curvedPathScallopHeight;
+        delete bottom.curvedPathScallopCalibratePasses;
         bottom.curvedPathOutline = false;
         bottom.note = op.note ? `${op.note} — bottom` : 'Curved bottom';
         contours.push(bottom);

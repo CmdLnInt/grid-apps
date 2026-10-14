@@ -95,6 +95,13 @@ function railAt(outline, y) {
 // Assign triangles only to stations within their Y range to avoid an O(mesh *
 // stations) scan of the entire board for every rail sample.
 function railApexSections(vertices, stations) {
+    let meshMinY = Infinity, meshMaxY = -Infinity;
+    for (let i = 1; i < vertices.length; i += 3) {
+        meshMinY = Math.min(meshMinY, vertices[i]); meshMaxY = Math.max(meshMaxY, vertices[i]);
+    }
+    // Projected outline coordinates are quantized to 0.00001 mm. Clamp
+    // rounded tip stations back onto the actual mesh for triangle sampling.
+    stations = stations.map(s => ({ ...s, y: Math.max(meshMinY, Math.min(meshMaxY, s.y)) }));
     const sections = stations.map(s => ({ y: s.y, bottomZ: Infinity, left: { x: Infinity, z: -Infinity }, right: { x: -Infinity, z: -Infinity } }));
     const lowerBound = y => {
         let low = 0, high = stations.length;
@@ -207,7 +214,7 @@ function generateBoardPathsY(vertices, { stepover = 5, safetyMargin = 10, sample
             if (railApex) {
                 const section = apexSections[index];
                 const target = side === 'left' ? section.left : section.right;
-                const amount = fraction * taper;
+                const amount = fraction * (safetyMargin === 0 ? 1 : taper);
                 return {
                     x: centre + (target.x + target.normal.x * toolRadius - centre) * amount,
                     y: s.y + target.normal.y * toolRadius * amount,
@@ -329,4 +336,44 @@ export function generateBoardOutline(vertices, options = {}) {
         delete point.contactY;
         return point;
     });
+}
+
+
+/** Clip the perimeter to a longitudinal slab, preserving explicit open gaps.
+ * The radius allowance keeps the entire XY cutter footprint out of end tabs.
+ */
+export function splitOutlineForEndTabs(points, outline, { lengthAxis = 'Y', margin = 10, toolRadius = 0 } = {}) {
+    if (!['X','Y'].includes(lengthAxis) || !Number.isFinite(margin) || margin < 0 ||
+        !Number.isFinite(toolRadius) || toolRadius < 0) throw new Error('invalid outline end-tab parameters');
+    if (margin === 0) return [points];
+    const key = lengthAxis.toLowerCase();
+    const low = Math.min(...outline.map(p=>p[key])) + margin + toolRadius;
+    const high = Math.max(...outline.map(p=>p[key])) - margin - toolRadius;
+    if (low >= high) throw new Error('outline end tabs leave no rail cutting length');
+    const segments = []; let current = [];
+    const equal = (a,b) => Math.hypot(a.x-b.x,a.y-b.y,a.z-b.z)<1e-8;
+    const finish = () => { if(current.length>1) segments.push(current); current=[]; };
+    const interpolate = (a,b,t) => ({x:a.x+(b.x-a.x)*t,y:a.y+(b.y-a.y)*t,z:a.z+(b.z-a.z)*t});
+    for(let i=1;i<points.length;i++) {
+        const a=points[i-1],b=points[i],delta=b[key]-a[key];
+        let from=0,to=1;
+        if(delta===0) { if(a[key]<low || a[key]>high) {finish();continue;} }
+        else {
+            const t1=(low-a[key])/delta,t2=(high-a[key])/delta;
+            from=Math.max(0,Math.min(t1,t2));to=Math.min(1,Math.max(t1,t2));
+            if(from>=to) {finish();continue;}
+        }
+        const first=interpolate(a,b,from),last=interpolate(a,b,to);
+        if(current.length && !equal(current.at(-1),first)) finish();
+        if(!current.length) current.push(first);
+        if(!equal(current.at(-1),last)) current.push(last);
+        if(to<1) finish();
+    }
+    finish();
+    // Ring start can lie within one rail. Join only that shared seam, keeping
+    // the first path's start/order and never bridging either excluded end.
+    if(segments.length>1 && equal(segments.at(-1).at(-1),segments[0][0])) {
+        const tail=segments.pop();segments[0]=tail.concat(segments[0].slice(1));
+    }
+    return segments;
 }

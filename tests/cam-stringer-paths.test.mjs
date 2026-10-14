@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 
 globalThis.self ??= globalThis;
-const { projectBoardOutline, generateBoardPaths, generateBoardOutline } = await import('../src/kiri/mode/cam/core/curved-path.js');
+const { projectBoardOutline, generateBoardPaths, generateBoardOutline, splitOutlineForEndTabs } = await import('../src/kiri/mode/cam/core/curved-path.js');
 
 function triangles(outline, z = 1) {
     const vertices = [];
@@ -272,4 +272,42 @@ test('OpenShaper X-long deck and perimeter preserve rotated geometry, Z and pass
         close(xp[i].x,yp[i].y);close(xp[i].y,-yp[i].x);close(xp[i].z,yp[i].z);
         close(xp[i].contactX,yp[i].contactY);
     }
+});
+
+
+test('zero finishing margin reaches both mesh tips and blunt rails without end taper',()=>{
+    const mesh=triangles(rectangle,20);
+    const result=generateBoardPaths(mesh,{safetyMargin:0,sampleStep:1,railApex:true,toolRadius:8,edgeHeight:3});
+    const centre=result.paths[0].points;
+    close(centre[0].y,0);close(centre.at(-1).y,200);
+    const outer=result.paths.find(p=>p.side==='left'&&p.fraction===1).points;
+    assert.ok(outer.every(p=>Math.abs(p.x+38)<1e-4));
+});
+
+test('outline end tabs split both rails with cutter-footprint clearance on X and Y',()=>{
+    for(const lengthAxis of ['Y','X']) {
+        const key=lengthAxis.toLowerCase();
+        const outline=lengthAxis==='Y'?rectangle:rectangle.map(p=>({x:p.y,y:-p.x}));
+        const mesh=triangles(outline,20);
+        const points=generateBoardOutline(mesh,{lengthAxis,toolRadius:8,edgeHeight:3,sampleStep:3});
+        const paths=splitOutlineForEndTabs(points,outline,{lengthAxis,margin:10,toolRadius:8});
+        assert.equal(paths.length,2);
+        for(const path of paths) {
+            assert.ok(path.length>2);
+            assert.notDeepEqual(path[0],path.at(-1));
+            for(const p of path) assert.ok(p[key]>=18-1e-6&&p[key]<=182+1e-6);
+            close(Math.min(...path.map(p=>p[key])),18);
+            close(Math.max(...path.map(p=>p[key])),182);
+        }
+        assert.equal(splitOutlineForEndTabs(points,outline,{lengthAxis,margin:0}).length,1);
+        assert.throws(()=>splitOutlineForEndTabs(points,outline,{lengthAxis,margin:100,toolRadius:8}));
+    }
+});
+
+test('full finishing samples rounded mesh extrema without missing tip triangles',()=>{
+    const mesh=triangles(asymmetric,20).map((value,index)=>index%3===1?value+0.123456:value);
+    const result=generateBoardPaths(mesh,{safetyMargin:0,sampleStep:2,railApex:true,toolRadius:8,edgeHeight:3});
+    assert.ok(result.paths.every(p=>p.points.every(q=>Number.isFinite(q.minZ))));
+    const centre=result.paths[0].points;
+    close(centre[0].y,.123456);close(centre.at(-1).y,240.123456);
 });
